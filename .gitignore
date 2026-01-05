@@ -1,0 +1,10 @@
+__pycache__/
+data
+*.egg-info/
+*.svg
+*.png
+*.csv
+*.tsv
+*.pdf
+*.pth
+*.ipynb

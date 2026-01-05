@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "CoPhaser"
+version = "0.1"
+dependencies = [
+    "scanpy==1.11.5",
+    "ipykernel==7.1.0",
+    "ipywidgets==8.1.8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"CoPhaser" = ["ressources/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
