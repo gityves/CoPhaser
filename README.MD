@@ -45,14 +45,14 @@ model.load_anndata(adata, layer_to_use="spliced")
 3) Initialize a trainer object with the desired weights of the different loss objects
 ```python
 trainer = Trainer(model, Loss.compute_loss, noise_model="NB")
-The model can be sensitive to the hyperparameters, a description of their impact and recommendation to set them can be found in the class description.
 ```
+The model can be sensitive to the hyperparameters, a description of their impact and recommendation to set them can be found in the class description.
 
 4) Train the model
 ```python
 trainer.train_model(n_epochs=200, lr=1e-2, device="cuda", batch_size=2048, )
-The batch_size can impact the training since it has a direct impact on the entropy inference. Usually set around 1/10th of the dataset.
 ```
+The batch_size can impact the training since it has a direct impact on the entropy inference. Usually set around 1/10th of the dataset.
 
 5) Get for instance the inferred phases and context space
 ```python
