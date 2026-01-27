@@ -5,6 +5,8 @@ import matplotlib as mpl
 import constants
 import math
 from functools import reduce
+from collections import defaultdict
+import numpy as np
 
 
 def label_panels_mosaic(
@@ -98,6 +100,8 @@ def save_figure(
     to_remove_vertically=[],
     mosaic=None,
     wpad=0.05,
+    hpad=0.05,
+    axs_pads={},
 ):
     """
     Saves the figure as an SVG file.
@@ -108,9 +112,12 @@ def save_figure(
         - folder: The folder path to save the figure (default: constants.PLOT_FOLDER).
     """
     figure.tight_layout()
-    for ax in axs.values():
+    for key, ax in axs.items():
         if isinstance(ax, list):
-            compress_axes_horizontal(ax)
+            if key in axs_pads:
+                compress_axes_grid(ax, wpad=axs_pads[key][0], hpad=axs_pads[key][1])
+            else:
+                compress_axes_grid(ax, wpad=wpad, hpad=hpad)
             for a in ax:
                 rasterize_low_zorder_artists(a)
         else:
@@ -119,11 +126,17 @@ def save_figure(
     if len(uncompressed_rows):  # in case label outside plot, compress all other rows
         assert mosaic is not None, "mosaic is required to compress rows"
         compressed_rows = [i for i in range(len(mosaic)) if i not in uncompressed_rows]
-        compress_axes_horizontal_rows(mosaic, axs, compressed_rows, wpad)
+        if key in axs_pads:
+            compress_axes_horizontal_rows(
+                mosaic, axs, compressed_rows, axs_pads[key][0], axs_pads[key][1]
+            )
+        else:
+            compress_axes_horizontal_rows(mosaic, axs, compressed_rows, wpad, hpad)
     if len(to_remove_vertically):
         assert mosaic is not None, "mosaic is required to compress rows"
         axs_to_compress_vertical = []
         for i, row in enumerate(mosaic):
+            row = np.unique(row)  # in case of multiple plots in one cell
             axs_to_compress_vertical.append([])  # placeholder for each row
             for key in row:
                 ax = axs[key]
@@ -137,7 +150,7 @@ def save_figure(
     return figure
 
 
-def compress_axes_horizontal_rows(mosaic, axs, rows, wpad=0.05):
+def compress_axes_horizontal_rows(mosaic, axs, rows, wpad=0.05, hpad=0.05):
     """
     Reduce horizontal spacing between axes in specified rows of a mosaic layout.
 
@@ -151,9 +164,12 @@ def compress_axes_horizontal_rows(mosaic, axs, rows, wpad=0.05):
         The indices of the rows in the mosaic to compress horizontally.
     wpad : float
         Horizontal padding between axes (fraction of figure width).
+    hpad : float
+        Vertical padding between axes (fraction of figure height).
     """
     for row_idx in rows:
         row_keys = mosaic[row_idx]
+        row_keys = np.unique(row_keys)  # in case of multiple plots in one cell
         ax_list = []
         for key in row_keys:
             ax = axs[key]
@@ -161,7 +177,7 @@ def compress_axes_horizontal_rows(mosaic, axs, rows, wpad=0.05):
                 ax_list.extend(ax)
             else:
                 ax_list.append(ax)
-        compress_axes_horizontal(ax_list, wpad=wpad)
+        compress_axes_grid(ax_list, wpad=wpad, hpad=hpad)
 
 
 def prepare_mosaic_layout(simple_mosaic):
@@ -321,33 +337,82 @@ def replace_mosaic_cell_with_grid(fig, axs, label, nrows, ncols):
     return axs
 
 
-def compress_axes_horizontal(ax_list, wpad=0.03):
+def compress_axes_grid(ax_list, wpad=0.03, hpad=0.02, tol=1e-3):
     """
-    Reduce horizontal spacing between a list of Axes objects (side-by-side).
+    Compress spacing between axes laid out in a grid by modifying both
+    horizontal and vertical gaps.
 
     Parameters
     ----------
     ax_list : list of matplotlib.axes.Axes
-        The axes to compress horizontally. Assumes they are aligned side-by-side.
+        Axes to compress.
     wpad : float
-        Horizontal padding between axes (fraction of figure width).
+        Horizontal padding between axes (figure fraction).
+    hpad : float
+        Vertical padding between axes (figure fraction).
+    tol : float
+        Tolerance for grouping axes by x/y position.
     """
 
-    # Get leftmost x0 and rightmost x1 in figure coords
-    left = ax_list[0].get_position().x0
-    right = ax_list[-1].get_position().x1
-    total_width = right - left
+    # --- Group into rows (by y0) ---
+    rows = defaultdict(list)
+    for ax in ax_list:
+        y0 = ax.get_position().y0
+        for key in rows:
+            if abs(key - y0) < tol:
+                rows[key].append(ax)
+                break
+        else:
+            rows[y0].append(ax)
 
-    n = len(ax_list)
-    total_gap = wpad * (n - 1)
-    width_each = (total_width - total_gap) / n
+    # --- Group into columns (by x0) ---
+    cols = defaultdict(list)
+    for ax in ax_list:
+        x0 = ax.get_position().x0
+        for key in cols:
+            if abs(key - x0) < tol:
+                cols[key].append(ax)
+                break
+        else:
+            cols[x0].append(ax)
 
-    # Reassign positions
-    for i, ax in enumerate(ax_list):
-        pos = ax.get_position()
-        new_x0 = left + i * (width_each + wpad)
-        new_pos = [new_x0, pos.y0, width_each, pos.height]
-        ax.set_position(new_pos)
+    # --- Compress rows horizontally ---
+    for row_axes in rows.values():
+        row_axes.sort(key=lambda ax: ax.get_position().x0)
+
+        left = row_axes[0].get_position().x0
+        right = row_axes[-1].get_position().x1
+        total_width = right - left
+
+        n = len(row_axes)
+        if n <= 1:
+            continue
+
+        total_gap = wpad * (n - 1)
+        width = (total_width - total_gap) / n
+
+        for i, ax in enumerate(row_axes):
+            pos = ax.get_position()
+            ax.set_position([left + i * (width + wpad), pos.y0, width, pos.height])
+
+    # --- Compress columns vertically ---
+    for col_axes in cols.values():
+        col_axes.sort(key=lambda ax: ax.get_position().y0)
+
+        bottom = col_axes[0].get_position().y0
+        top = col_axes[-1].get_position().y1
+        total_height = top - bottom
+
+        n = len(col_axes)
+        if n <= 1:
+            continue
+
+        total_gap = hpad * (n - 1)
+        height = (total_height - total_gap) / n
+
+        for i, ax in enumerate(col_axes):
+            pos = ax.get_position()
+            ax.set_position([pos.x0, bottom + i * (height + hpad), pos.width, height])
 
 
 def compress_axes_vertical(ax_list, to_remove):
