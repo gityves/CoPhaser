@@ -398,6 +398,7 @@ def plot_smoothed_profiles(
     cmap=None,
     add_end_start_points=False,
     hue_order=None,
+    estimator="mean",
 ):
     x_raw = x.copy()
     x = [val.mid for val in pd.cut(x, bins=nbins)]
@@ -417,7 +418,14 @@ def plot_smoothed_profiles(
 
     if label is None:
         sns.lineplot(
-            x=x, y=y, hue=hue, ax=ax, legend=legend, palette=cmap, hue_order=hue_order
+            x=x,
+            y=y,
+            hue=hue,
+            ax=ax,
+            legend=legend,
+            palette=cmap,
+            hue_order=hue_order,
+            estimator=estimator,
         )
     else:
         sns.lineplot(
@@ -429,6 +437,7 @@ def plot_smoothed_profiles(
             legend=legend,
             palette=cmap,
             hue_order=hue_order,
+            estimator=estimator,
         )
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)

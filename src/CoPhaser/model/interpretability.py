@@ -135,7 +135,7 @@ def compute_avg_feature_attributions(
     x_data = model.rhythmic_genes.to(device)
     library_size = model.library_size.to(device)
     mu_Z = latent_outputs["mu_z"].to(device)
-    amp_z = latent_outputs["amp_Z_enc"].to(device)
+    amp_z = latent_outputs["lambda_enc"].to(device)
     use_mu_z_encoder = model.use_mu_z_encoder
 
     mu_dim = 2

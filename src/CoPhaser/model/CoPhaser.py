@@ -206,6 +206,8 @@ class CoPhaser(nn.Module):
             library_size = torch.tensor(
                 adata.obs[library_size_field], dtype=torch.float32
             )
+        # transform 0 library sizes to 1 to avoid NaNs
+        library_size[library_size == 0] = 1.0
         # Extract rhythmic genes
         rhythmic_genes = (
             adata[:, self.rhythmic_gene_names].layers[layer_to_use].toarray()

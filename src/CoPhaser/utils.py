@@ -26,12 +26,13 @@ def get_variable_genes(adata, n_variable_genes=2000, layer=None, min_cells=3):
 def add_histones_fraction(adata, layer="spliced", use_only_clustered=False):
     if use_only_clustered:
         histones_genes = gene_sets.human_canonical_histones
-        histones_genes_in_data = list(
-            set(histones_genes).intersection(set(adata.var_names))
-        )
+        histones_genes_in_data = adata.var_names[
+            [g.upper() in histones_genes for g in adata.var_names]
+        ]
         adata.obs["histones_fraction"] = (
             adata[:, histones_genes_in_data].layers[layer].sum(axis=1)
         ) / adata.layers[layer].sum(axis=1)
+        print(len(histones_genes_in_data), "histone genes found in data")
     else:
         query = "Hist"
         if adata.var_names[int(len(adata.var_names) / 2)].isupper():

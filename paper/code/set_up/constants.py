@@ -28,4 +28,4 @@ mpl.rcParams.update(
 )
 
 
-PLOT_FOLDER = "/home/maxine/Documents/paychere/cell_cycle_VAE_Fourrier_model/paper/figures/"  # folder path to save plots
+PLOT_FOLDER = "/home/maxine/Documents/paychere/CoPhaser/paper/figures/"  # folder path to save plots
