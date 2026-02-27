@@ -42,9 +42,5 @@ class RhythmicDecoder(FreezableModule):
         harm_indices = self._get_harm_indices(harmonics)
         self.unfreeze_indices("fourier_coefficients.weight", harm_indices, 1)
 
-    def freeze_fourier_coefficients(self, freeze_mean=True):
-        if freeze_mean:
-            # TODO: freeze means
-            self.freeze_weights_harm(list(range(self.n_harm * 2)))
-        else:
-            self.freeze_weights_harm(list(range(self.n_harm * 2)))
+    def freeze_fourier_coefficients(self):
+        self.freeze_weights_harm(list(range(self.n_harm * 2)))

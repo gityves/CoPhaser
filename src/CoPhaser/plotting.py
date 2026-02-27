@@ -188,7 +188,7 @@ def plot_cell_cycle(
 ):
     if CCG_path == "CCG_annotated.csv":
         CCG_path = pkg_resources.resource_filename(
-            __name__, f"ressources/CCG_annotated.csv"
+            __name__, f"resources/CCG_annotated.csv"
         )
     df_ccg = pd.read_csv(CCG_path, index_col=0)
     df_phase_ptp = utils.get_ptp_phase(df_rhythmic)

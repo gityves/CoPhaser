@@ -16,7 +16,7 @@ dependencies = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-"CoPhaser" = ["ressources/*"]
+"CoPhaser" = ["resources/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

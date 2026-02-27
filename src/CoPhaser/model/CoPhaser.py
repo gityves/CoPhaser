@@ -90,6 +90,9 @@ class CoPhaser(nn.Module):
         self.z_range = z_range
         self.lambda_range = lambda_range
 
+        # modified by the trainer
+        self.cycling_status_prior = False
+
         # set up variable and rhythmic genes
         if force_context_genes_order is not None:
             self.context_genes = force_context_genes_order
@@ -461,16 +464,14 @@ class CoPhaser(nn.Module):
         gene_indices_input = [g in self.rhythmic_gene_names for g in gene_names]
         self.rhythmic_encoder.unfreeze_weights_genes(gene_indices_input)
         if self.rhythmic_decoder_to_all_genes:
-            gene_indices_output = [
-                g in self.rhythmic_decoder_to_all_genes for g in gene_names
-            ]
+            gene_indices_output = [g in self.context_genes for g in gene_names]
             self.rhythmic_decoder.unfreeze_weights_genes(gene_indices_output)
         else:
             self.rhythmic_decoder.unfreeze_weights_genes(gene_indices_input)
 
     def _get_gene_annotation(self):
         CCG_path = pkg_resources.resource_filename(
-            __name__, f"../ressources/CCG_annotated.csv"
+            __name__, f"../resources/CCG_annotated.csv"
         )
         df_gene = pd.read_csv(CCG_path, index_col="Primary name")["Peaktime"]
         model_gene_names = (
@@ -615,7 +616,7 @@ class CoPhaser(nn.Module):
             Grid of angles used for the posterior computation.
         """
         adata = adata.copy()
-        self.to("cuda")
+        self.to(device)
         library_size, rhythmic_genes, variable_genes, mean_genes = (
             self._get_library_size_rhythmic_var_genes(adata, layer_to_use)
         )
