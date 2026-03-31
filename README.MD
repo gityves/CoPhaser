@@ -2,6 +2,7 @@
 This repo contains the CoPhaser model for single cell phase inference from scRNA-seq.
 
 # Installation
+Expected running time in the order of a few minutes (depend on your internet connection).
 0) Download this repo
 1) Create a [conda environment](https://www.anaconda.com/docs/getting-started/miniconda/main)
 ```bash
@@ -22,7 +23,7 @@ pip install .
 ```
 
 # Usage
-You can find a notebook as example.
+You can find a tutorial in the tutorials folder, but below are described the minimal steps required to train a model and extract the results from it.
 
 1) Initialize a model, passing the cycling gene names, the context gene names (usually the 2000 most variable genes) and the dimension of z and the number of harmonics used for the rhythmic reconstruction.
 ```python

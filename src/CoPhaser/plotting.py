@@ -340,40 +340,43 @@ def plot_gene_profile(
     for i in range(len(genes)):
         sns.scatterplot(
             x=df_mean[theta_col],
-            y=np.log2(
+            y=np.log(
                 adata[:, genes[i]].layers[layer_to_use].toarray().flatten()
                 / library_size
-                * 10**6
-                + 3
+                * 10**4
+                + 1
             ),
             alpha=alpha,
-            label="Observed CPM",
+            label="Observed",
             ax=axs[i],
             color="red",
             edgecolor=None,
-        ).set(ylabel="Observed CPM", xlabel="Inferred Phase", title=genes[i])
+        ).set(ylabel="Normalized Counts", xlabel="Inferred Phase", title=genes[i])
         if hue is None:
             sns.scatterplot(
                 x=df_mean[theta_col],
-                y=np.log2(df_mean[genes[i]] / library_size * 10**6 + 3),
+                y=np.log(df_mean[genes[i]] / library_size * 10**4 + 1),
                 alpha=alpha,
                 label="Inferred Means",
                 ax=axs[i],
                 edgecolor=None,
-            ).set(ylabel="log2 CPM", xlabel="Inferred Phase", title=genes[i])
+            ).set(ylabel="Normalized Counts", xlabel="Inferred Phase", title=genes[i])
         else:
             sns.scatterplot(
                 x=df_mean[theta_col],
-                y=np.log2(df_mean[genes[i]] / library_size * 10**6 + 3),
+                y=np.log(df_mean[genes[i]] / library_size * 10**4 + 1),
                 alpha=alpha,
                 ax=axs[i],
                 hue=hue,
                 edgecolor=None,
-            ).set(ylabel="log2 CPM", xlabel="Inferred Phase", title=genes[i])
+            ).set(ylabel="Normalized Counts", xlabel="Inferred Phase", title=genes[i])
         if i == ncols - 1:
             axs[i].legend(loc="upper left", bbox_to_anchor=(1, 1))
         else:
-            axs[i].get_legend().remove()
+            try:
+                axs[i].get_legend().remove()
+            except:
+                pass
         axs[i].set_xlabel("Inferred θ")
         axs[i].set_xlim([-np.pi, np.pi])
 
