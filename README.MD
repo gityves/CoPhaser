@@ -3,6 +3,7 @@ This repo contains the CoPhaser model for single cell phase inference from scRNA
 
 # Installation
 Expected running time in the order of a few minutes (depend on your internet connection).
+
 0) Download this repo
 1) Create a [conda environment](https://www.anaconda.com/docs/getting-started/miniconda/main)
 ```bash
