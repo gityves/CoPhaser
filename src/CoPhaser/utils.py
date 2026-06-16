@@ -9,6 +9,7 @@ import anndata
 import matplotlib.pyplot as plt
 import torch
 from CoPhaser import gene_sets
+from scipy.sparse import issparse
 
 
 def get_variable_genes(adata, n_variable_genes=2000, layer=None, min_cells=3):
@@ -570,3 +571,161 @@ def compute_smoothed_variance_and_range(
     range_across_groups = mean_per_group.max() / mean_per_group.min()
 
     return mean_variance_across_bins, range_across_groups
+
+
+def make_design_matrix(theta: np.ndarray, K: int = 1) -> np.ndarray:
+    cols = [np.ones(len(theta))]
+    for k in range(1, K + 1):
+        cols.append(np.cos(k * theta))
+        cols.append(np.sin(k * theta))
+    return np.column_stack(cols)
+
+
+def fit_cyclic_snr(
+    X,
+    theta,
+    gene_names=None,
+    K=1,
+    s=None,
+    lambda_ridge=1e-1,
+    n_folds=5,
+    max_cells=10000,
+    return_beta=False,
+):
+    """
+    Cyclic SNR with cross-validated signal and noise variance estimates, using a Poisson regression model.
+
+    Parameters:
+        X: (N, G) array-like of raw scRNAseq counts
+        theta: (N,) fitted phase values for each cell
+        gene_names: list of gene names corresponding to the columns of X, or None to use generic names like gene_0, gene_1, ...
+        K: number of Fourier harmonics to use in the cyclic regression model (default 1, i.e. just sine and cosine)
+        s: (N,) array-like of cell-specific size factors (e.g. library sizes), or None to use sum of counts as size factor
+        lambda_ridge: L2 regularization strength for the Poisson regression (default 0.1)
+        n_folds: number of cross-validation folds to use (default 5)
+        max_cells: maximum number of cells to use for computation (default 10000)
+        return_beta: whether to return the fitted regression coefficients for each gene (default False)
+    Returns:
+        snr: DataFrame with columns "gene", "snr", "signal", "noise"
+        beta (optional): (G, p) array of fitted regression coefficients for each gene
+    """
+
+    def _fit_beta_irls(Xtr, Dtr, log_s_tr, lambda_ridge):
+        """log-OLS init + one Poisson IRLS step, batched over genes."""
+        p = Dtr.shape[1]
+        G = Xtr.shape[1]
+        Y = np.log(Xtr + 0.1) - log_s_tr[:, None]
+        DTD = Dtr.T @ Dtr
+        beta = np.linalg.solve(DTD + lambda_ridge * np.diag(np.diag(DTD)), Dtr.T @ Y).T
+        eta = log_s_tr[:, None] + Dtr @ beta.T
+        mu = np.exp(np.clip(eta, -30, 30))
+        t = (Dtr @ beta.T) + (Xtr - mu) / np.maximum(mu, 1e-8)  # IRLS working response
+        w = mu
+        DTWD = np.empty((G, p, p))
+        for i in range(p):
+            for j in range(i, p):
+                v = (Dtr[:, i] * Dtr[:, j]) @ w
+                DTWD[:, i, j] = v
+                DTWD[:, j, i] = v
+        DTWz = (Dtr.T @ (w * t)).T
+        d = np.arange(p)
+        DTWD[:, d, d] += lambda_ridge * DTWD[:, d, d]
+        beta = np.linalg.solve(DTWD, DTWz[..., None])[..., 0]
+        return beta
+
+    def _down_sample(X, theta, s, max_cells):
+        idx = np.random.choice(X.shape[0], max_cells, replace=False)
+        X = X[idx]
+        theta = theta[idx]
+        if s is not None:
+            s = s[idx]
+        return X, theta, s
+
+    if issparse(X):
+        if X.shape[0] > max_cells:
+            X, theta, s = _down_sample(X, theta, s, max_cells)
+        X = X.toarray()
+    X = np.asarray(X, dtype=np.float64)
+    # randomly sample 10,000 cells if too large, to speed up computation
+    if X.shape[0] > max_cells:
+        X, theta, s = _down_sample(X, theta, s, max_cells)
+    N, G = X.shape
+
+    if s is None:
+        s = X.sum(axis=1) / 1e4
+    s = np.asarray(s, dtype=np.float64)
+    log_s = np.log(np.maximum(s, 1e-8))
+    if gene_names is None:
+        gene_names = [f"gene_{i}" for i in range(G)]
+
+    D = make_design_matrix(theta, K)
+
+    fold = np.arange(N) % n_folds  # deterministic interleaved split
+    signal_num = np.zeros(G)
+    noise_ss = np.zeros(G)
+
+    for f in range(n_folds):
+        te = fold == f
+        tr = ~te
+        beta = _fit_beta_irls(X[tr], D[tr], log_s[tr], lambda_ridge)
+
+        # out-of-sample predictions
+        mu_hat_te = np.exp(np.clip(log_s[te, None] + D[te] @ beta.T, -30, 30))
+        # out-of-sample null (intercept-only Poisson MLE on train: exp(b0) = sumX/sum_s)
+        c = X[tr].sum(0) / max(s[tr].sum(), 1e-8)
+        mu_null_te = s[te, None] * c
+
+        dd = X[te] - mu_null_te
+        ff = mu_hat_te - mu_null_te
+        signal_num += (dd * ff).sum(0)
+        noise_ss += ((X[te] - mu_hat_te) ** 2).sum(0)
+
+    signal_var = np.maximum(signal_num / N, 0.0)
+    noise_var = noise_ss / N
+
+    if gene_names is None:
+        gene_names = [f"gene_{i}" for i in range(G)]
+
+    snr = pd.DataFrame(
+        {
+            "gene": gene_names,
+            "snr": signal_var / noise_var,
+            "signal": signal_var,
+            "noise": noise_var,
+        }
+    )
+    if return_beta:
+        # final full-data beta to return
+        beta = _fit_beta_irls(X, D, log_s, lambda_ridge)
+        return snr, beta
+    return snr
+
+
+def circular_correlation(alpha, beta):
+    """
+    Circular-circular correlation coefficient.
+
+    Parameters
+    ----------
+    alpha, beta : array-like
+        Angles in radians.
+
+    Returns
+    -------
+    rho : float
+        Circular correlation coefficient.
+    """
+    alpha = np.asarray(alpha)
+    beta = np.asarray(beta)
+
+    alpha_bar = circmean(alpha, high=2 * np.pi, low=0)
+    beta_bar = circmean(beta, high=2 * np.pi, low=0)
+
+    sin_alpha = np.sin(alpha - alpha_bar)
+    sin_beta = np.sin(beta - beta_bar)
+
+    rho = np.sum(sin_alpha * sin_beta) / np.sqrt(
+        np.sum(sin_alpha**2) * np.sum(sin_beta**2)
+    )
+
+    return rho
