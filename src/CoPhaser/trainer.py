@@ -159,11 +159,14 @@ class Trainer:
         n_epochs=200,
         lr=1e-2,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        batch_size=1024,
+        batch_size=None,
         print_only_total_loss=False,
         silent=False,
     ):
         self._check_data_loaded()
+        if batch_size is None:
+            # set batch size to roughly 1/10 of the number of cells
+            batch_size = 2 ** int(np.log2(len(self.model.library_size) / 10))
 
         self.model.to(device)
         data_loader = self._create_dataloader(batch_size)
