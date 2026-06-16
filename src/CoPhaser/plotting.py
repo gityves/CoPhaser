@@ -702,3 +702,85 @@ def plot_phase_accuracy(
     ax.set_xlim([-np.pi, np.pi])
     ax.set_ylim([-np.pi, np.pi])
     ax.axline((0, 0), slope=1, color="black", linestyle="--")
+
+
+def plot_PMI(x, y, ax, n_bins=10, sigma=0.5, double_plot=False, min_value=np.log2(1.5)):
+    from matplotlib.colors import TwoSlopeNorm
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    from scipy.ndimage import gaussian_filter
+
+    def modify_axis_labels(ax, x, y, n_bins):
+        rad = ""
+        if np.max(abs(x)) <= np.pi:
+            ax.set_xticks([-np.pi, np.pi])
+            ax.set_xticklabels(["-π", "π"])
+            x_bin_edges = np.linspace(-np.pi, np.pi, n_bins, endpoint=True)
+        else:
+            ax.set_xticks([])
+            x_bin_edges = np.linspace(np.min(x), np.max(x), n_bins)
+        if np.max(abs(y)) <= np.pi:
+            ax.set_yticks([-np.pi, np.pi])
+            ax.set_yticklabels(["-π", "π"])
+            y_bin_edges = np.linspace(-np.pi, np.pi, n_bins, endpoint=True)
+        else:
+            ax.set_yticks([])
+            y_bin_edges = np.linspace(np.min(y), np.max(y), n_bins)
+        return (x_bin_edges, y_bin_edges)
+
+    def compute_PMI(x, y, bins, sigma):
+        # Compute 2D histogram
+        H, xedges, yedges = np.histogram2d(x, y, bins=bins)
+
+        # Circular Gaussian smoothing
+        H_smooth = gaussian_filter(H, sigma=(sigma, sigma), mode="wrap")
+
+        # Normalize along x-axis (each column sums to 1)
+        eps = 1e-9  # small constant to avoid log(0)
+
+        Px = H_smooth.sum(axis=1, keepdims=True)
+        Py = H_smooth.sum(axis=0, keepdims=True)
+
+        Pxy = H_smooth / H_smooth.sum()
+        Px = Px / H_smooth.sum()
+        Py = Py / H_smooth.sum()
+
+        PMI = np.log2((Pxy + eps) / (Px @ Py + eps))
+        return PMI, xedges, yedges
+
+    bins = modify_axis_labels(ax, x, y, n_bins)
+    PMI, xedges, yedges = compute_PMI(x, y, bins, sigma)
+    if double_plot:
+        PMI = np.hstack((np.vstack((PMI, PMI)), np.vstack((PMI, PMI))))
+        xedges = np.concatenate((xedges, xedges[:-1] + np.max(xedges)))
+        yedges = np.concatenate((yedges, yedges[:-1] + 2 * np.pi))
+
+    vmin = min(-min_value, np.min(PMI))
+    vmax = max(min_value, np.max(PMI))
+
+    norm = TwoSlopeNorm(
+        vmin=vmin,
+        vcenter=0.0,
+        vmax=vmax,
+    )
+
+    im = ax.pcolormesh(
+        xedges,
+        yedges,
+        PMI.T,
+        cmap="coolwarm",
+        norm=norm,
+    )
+
+    divider = make_axes_locatable(ax)
+    ax_cbar = divider.append_axes("right", size="5%", pad=0.1)
+    cbar = plt.colorbar(
+        im,
+        cax=ax_cbar,
+        orientation="vertical",
+    )
+    cbar.outline.set_visible(False)
+    cbar.set_ticks([np.min(PMI), 0, np.max(PMI)])
+    # set labels as round numbers
+    cbar.set_ticklabels(
+        [f"{np.round(np.min(PMI), 1)}", "0", f"{np.round(np.max(PMI), 1)}"]
+    )
