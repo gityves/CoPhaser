@@ -9,3 +9,4 @@ data
 *.pth
 *.ipynb
 *.h5ad
+test

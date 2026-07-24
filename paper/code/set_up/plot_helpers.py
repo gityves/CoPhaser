@@ -126,12 +126,12 @@ def save_figure(
     if len(uncompressed_rows):  # in case label outside plot, compress all other rows
         assert mosaic is not None, "mosaic is required to compress rows"
         compressed_rows = [i for i in range(len(mosaic)) if i not in uncompressed_rows]
-        if key in axs_pads:
-            compress_axes_horizontal_rows(
-                mosaic, axs, compressed_rows, axs_pads[key][0], axs_pads[key][1]
-            )
-        else:
-            compress_axes_horizontal_rows(mosaic, axs, compressed_rows, wpad, hpad)
+        axs_pads_digits = {
+            int(key): val for key, val in axs_pads.items() if str(key).isdigit()
+        }
+        compress_axes_horizontal_rows(
+            mosaic, axs, compressed_rows, wpad, hpad, axs_pads_digits
+        )
     if len(to_remove_vertically):
         assert mosaic is not None, "mosaic is required to compress rows"
         axs_to_compress_vertical = []
@@ -150,7 +150,7 @@ def save_figure(
     return figure
 
 
-def compress_axes_horizontal_rows(mosaic, axs, rows, wpad=0.05, hpad=0.05):
+def compress_axes_horizontal_rows(mosaic, axs, rows, wpad=0.05, hpad=0.05, axs_pads={}):
     """
     Reduce horizontal spacing between axes in specified rows of a mosaic layout.
 
@@ -177,7 +177,12 @@ def compress_axes_horizontal_rows(mosaic, axs, rows, wpad=0.05, hpad=0.05):
                 ax_list.extend(ax)
             else:
                 ax_list.append(ax)
-        compress_axes_grid(ax_list, wpad=wpad, hpad=hpad)
+        if row_idx in axs_pads:
+            compress_axes_grid(
+                ax_list, wpad=axs_pads[row_idx][0], hpad=axs_pads[row_idx][1]
+            )
+        else:
+            compress_axes_grid(ax_list, wpad=wpad, hpad=hpad)
 
 
 def prepare_mosaic_layout(simple_mosaic):
@@ -269,10 +274,16 @@ def create_pannels(
     # Account for vertical padding between subplots
     num_rows = len(height_ratios_scaling)
     padding_height = h_pad * (num_rows - 1) / 72  # Convert points to inches
-    print("height_ratios_scaling:", height_ratios_scaling)
-    total_length = (
-        sum(height_ratios_scaling) * (total_width / len(mosaic[0])) + padding_height
+    print(
+        "height_ratios_scaling:",
+        height_ratios_scaling,
+        "sum:",
+        sum(height_ratios_scaling),
     )
+    print("height_ratios:", height_ratios)
+    print("len(mosaic[0]):", len(mosaic[0]))
+    total_length = sum(height_ratios) * (total_width / len(mosaic[0])) + padding_height
+    print("total_length:", total_length, "total_width:", total_width)
 
     # Create the figure and axes objects using the subplot_mosaic function
     fig, ax_dict = plt.subplot_mosaic(

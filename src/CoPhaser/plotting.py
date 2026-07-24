@@ -387,6 +387,58 @@ def plot_gene_profile(
     plt.tight_layout()
 
 
+def plot_fraction_counts(
+    adata,
+    thetas,
+    genes=["Top2a", "Pcna", "Mki67", "Mcm6"],
+    layer_to_use="total",
+    ncols=2,
+    gene_to_upper=True,
+    library_size=None,
+    hue=None,
+    alpha=0.2,
+):
+    nrows = np.ceil(len(genes) / ncols).astype(int)
+    fig, axs = modify_axis_labels(
+        figsize=(5 * ncols + 3, 5 * nrows), ncols=ncols, nrows=nrows, axis="x"
+    )
+    axs = axs.flatten()
+    if gene_to_upper:
+        genes = [gene.upper() for gene in genes]
+    if library_size is None:
+        library_size = adata.layers[layer_to_use].sum(axis=1).A1
+
+    for i in range(len(genes)):
+        sns.scatterplot(
+            x=thetas,
+            y=np.log(
+                adata[:, genes[i]].layers[layer_to_use].toarray().flatten()
+                / library_size
+                * 10**4
+                + 1
+            ),
+            alpha=alpha,
+            ax=axs[i],
+            hue=hue,
+            edgecolor=None,
+        ).set(ylabel="Normalized Counts", xlabel="Inferred Phase", title=genes[i])
+        if i == ncols - 1:
+            axs[i].legend(loc="upper left", bbox_to_anchor=(1, 1))
+        else:
+            try:
+                axs[i].get_legend().remove()
+            except:
+                pass
+        axs[i].set_xlabel("Inferred θ")
+        axs[i].set_xlim([-np.pi, np.pi])
+
+    fig.suptitle(
+        "Observed fraction of counts in function of inferred θ",
+        fontsize=TITLE_FONT_SIZE,
+    )
+    plt.tight_layout()
+
+
 def plot_smoothed_profiles(
     x,
     y,
@@ -704,7 +756,17 @@ def plot_phase_accuracy(
     ax.axline((0, 0), slope=1, color="black", linestyle="--")
 
 
-def plot_PMI(x, y, ax, n_bins=10, sigma=0.5, double_plot=False, min_value=np.log2(1.5)):
+def plot_PMI(
+    x,
+    y,
+    ax,
+    n_bins=10,
+    sigma=0.5,
+    double_plot=False,
+    min_value=np.log2(1.5),
+    add_cbar=True,
+    label_pads=-5,
+):
     from matplotlib.colors import TwoSlopeNorm
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     from scipy.ndimage import gaussian_filter
@@ -771,16 +833,19 @@ def plot_PMI(x, y, ax, n_bins=10, sigma=0.5, double_plot=False, min_value=np.log
         norm=norm,
     )
 
-    divider = make_axes_locatable(ax)
-    ax_cbar = divider.append_axes("right", size="5%", pad=0.1)
-    cbar = plt.colorbar(
-        im,
-        cax=ax_cbar,
-        orientation="vertical",
-    )
-    cbar.outline.set_visible(False)
-    cbar.set_ticks([np.min(PMI), 0, np.max(PMI)])
-    # set labels as round numbers
-    cbar.set_ticklabels(
-        [f"{np.round(np.min(PMI), 1)}", "0", f"{np.round(np.max(PMI), 1)}"]
-    )
+    if add_cbar:
+        divider = make_axes_locatable(ax)
+        ax_cbar = divider.append_axes("right", size="5%", pad=0.1)
+        cbar = plt.colorbar(
+            im,
+            cax=ax_cbar,
+            orientation="vertical",
+        )
+        cbar.outline.set_visible(False)
+        cbar.set_ticks([np.min(PMI), 0, np.max(PMI)])
+        # set labels as round numbers
+        cbar.set_ticklabels(
+            [f"{np.round(np.min(PMI), 1)}", "0", f"{np.round(np.max(PMI), 1)}"]
+        )
+        # add label to cbar
+        cbar.set_label("bits", labelpad=label_pads)

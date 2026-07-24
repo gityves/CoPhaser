@@ -196,15 +196,15 @@ def get_jensenshannon_raw(pseudotime_values, hue_values, n_bins=50):
     p, _ = np.histogram(p_pseudotimes, bins=bins, density=True)
     q, _ = np.histogram(q_pseudotimes, bins=bins, density=True)
 
-    # Compute Jensen-Shannon divergence using scipy
-    js_divergence = jensenshannon(p, q, 2)
+    # Compute Jensen-Shannon distance using scipy
+    js_distance = jensenshannon(p, q, 2)
 
-    return js_divergence
+    return js_distance
 
 
 def get_jensenshannon(adata, pseudotime_column, hue, n_bins=50):
     """
-    Compute the Jensen-Shannon divergence between two categories of cells
+    Compute the Jensen-Shannon distance between two categories of cells
     based on their pseudotime_column distribution.
 
     Parameters:
@@ -213,7 +213,7 @@ def get_jensenshannon(adata, pseudotime_column, hue, n_bins=50):
     - hue: Name of the column in adata separating the two type of cells
 
     Returns:
-    - js_divergence: Jensen-Shannon divergence between the two distribution of cells
+    - js_distance: Jensen-Shannon distance between the two distribution of cells
     """
     pseudotime_values = adata.obs[pseudotime_column].values
     hue_values = adata.obs[hue].values
@@ -245,10 +245,10 @@ def get_jensenshannon(adata, pseudotime_column, hue, n_bins=50):
     p, _ = np.histogram(p_pseudotimes, bins=bins, density=True)
     q, _ = np.histogram(q_pseudotimes, bins=bins, density=True)
 
-    # Compute Jensen-Shannon divergence using scipy
-    js_divergence = jensenshannon(p, q, 2)
+    # Compute Jensen-Shannon distance using scipy
+    js_distance = jensenshannon(p, q, 2)
 
-    return js_divergence
+    return js_distance
 
 
 def pseudotime_mutual_information(category, pseudotime, n_bins=50):
@@ -718,6 +718,9 @@ def circular_correlation(alpha, beta):
     alpha = np.asarray(alpha)
     beta = np.asarray(beta)
 
+    alpha = alpha % (2 * np.pi)
+    beta = beta % (2 * np.pi)
+
     alpha_bar = circmean(alpha, high=2 * np.pi, low=0)
     beta_bar = circmean(beta, high=2 * np.pi, low=0)
 
@@ -729,3 +732,118 @@ def circular_correlation(alpha, beta):
     )
 
     return rho
+
+
+def normalized_shanon_entropy(distribution):
+    distribution = distribution / distribution.sum(dim=1, keepdim=True)
+    return -(distribution * torch.log(distribution + 1e-8)).sum(dim=1) / np.log(
+        distribution.shape[1]
+    )
+
+
+def fold_change_correction(
+    F,
+    delta_mu,
+    df,
+    column_individual,
+    column_control,
+    gene_names,
+    min_cells_per_patient=1,
+):
+    """
+    Corrects pseudobulk log2 fold-changes for cell-cycle composition effects by
+    computing the log2 fold-change of the cell-cycle-independent level component
+    delta_mu of the model, instead of the naive pseudobulk. The results should be
+    filtered by removing genes with low mean expression, as the log is unstable
+    for lowly expressed genes.
+
+    Parameters
+    ----------
+    F : array-like, shape (n_cells, n_genes)
+        The cell-cycle-dependent component of the model (cyclic).
+    delta_mu : array-like, shape (n_cells, n_genes)
+        The cell-cycle-independent level component of the model.
+    df : pandas.DataFrame
+        DataFrame containing the individual and control group information.
+    column_individual : str
+        Column name for the individual identifier.
+    column_control : str
+        Column name for the control group identifier.
+    gene_names : list
+        List of gene names.
+    min_cells_per_patient : int, default=1
+        Minimum number of cells required per patient.
+
+    Returns
+    -------
+    results_df : pandas.DataFrame
+        DataFrame containing the naive and corrected log2 fold-changes and their differences.
+    """
+    F = np.asarray(F)
+    delta_mu = np.asarray(delta_mu)
+
+    if F.shape != delta_mu.shape:
+        raise ValueError("F and delta_mu must have the same shape")
+    if len(df) != F.shape[0]:
+        raise ValueError("df and arrays must contain the same number of cells")
+
+    patient = df[column_individual].to_numpy()
+    is_control = df[column_control].to_numpy().astype(bool)
+    if is_control.all() or (~is_control).all():
+        raise ValueError("Both non-control and control groups are required")
+    non_control_patients = df.loc[is_control, column_individual].unique()
+
+    # ---------------------------------------------------------------
+    # Patient-level aggregation: natural-scale means
+    # ---------------------------------------------------------------
+    exp_F = np.exp(F)
+    exp_dmu = np.exp(delta_mu)
+    full = exp_F * exp_dmu
+
+    cell_counts = pd.Series(patient).value_counts()
+    keep_patients = cell_counts[cell_counts >= min_cells_per_patient].index
+
+    E_periodic = pd.DataFrame(exp_F).groupby(patient, sort=False).mean()
+    M_corrected = pd.DataFrame(exp_dmu).groupby(patient, sort=False).mean()
+    pb_full = pd.DataFrame(full).groupby(patient, sort=False).mean()
+
+    mask = E_periodic.index.isin(keep_patients)
+    E_periodic, M_corrected, pb_full = (
+        E_periodic[mask],
+        M_corrected[mask],
+        pb_full[mask],
+    )
+
+    patient_is_control = np.isin(E_periodic.index, non_control_patients)
+    if patient_is_control.sum() == 0 or (~patient_is_control).sum() == 0:
+        raise ValueError(
+            "min_cells_per_patient filtering removed all patients from one group"
+        )
+
+    M_corrected_control, M_corrected_B = (
+        M_corrected[patient_is_control].to_numpy(),
+        M_corrected[~patient_is_control].to_numpy(),
+    )
+    pb_control, pb_B = (
+        pb_full[patient_is_control].to_numpy(),
+        pb_full[~patient_is_control].to_numpy(),
+    )
+
+    # Naive pseudobulk log2FC: equal weight per patient, true full product
+    mean_control, mean_B = pb_control.mean(axis=0), pb_B.mean(axis=0)
+    naive = np.log2(mean_B) - np.log2(mean_control)
+
+    # Corrected pseudobulk log2FC: equal weight per patient, using only M_corrected
+    M_corrected_control_bar, M_corrected_B_bar = M_corrected_control.mean(
+        axis=0
+    ), M_corrected_B.mean(axis=0)
+    corrected = np.log2(M_corrected_B_bar) - np.log2(M_corrected_control_bar)
+
+    # error between naive and corrected
+    error = naive - corrected
+    results_df = pd.DataFrame(
+        {"naive_log2fc": naive, "corrected_log2fc": corrected, "error": error}
+    )
+    results_df.index = gene_names
+
+    return results_df
