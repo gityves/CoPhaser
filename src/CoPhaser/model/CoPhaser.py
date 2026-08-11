@@ -406,7 +406,9 @@ class CoPhaser(nn.Module):
         )
 
         if self.use_lambda and (epoch > 100 or epoch == -1):
-            _lambda = 2 ** (self.lambda_decoder(z) * 2 - 1)
+            _lambda = 2 ** (
+                self.lambda_decoder(z) * self.lambda_range - self.lambda_range / 2
+            )
             lambda_enc = _lambda
         else:
             _lambda = torch.ones_like(qz_m[:, 0])
