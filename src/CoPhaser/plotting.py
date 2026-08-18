@@ -1,3 +1,5 @@
+from matplotlib.gridspec import GridSpecFromSubplotSpec
+import matplotlib.transforms as transforms
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,6 +13,8 @@ import pkg_resources
 
 import numpy as np
 import matplotlib.pyplot as plt
+
+import umap
 
 TITLE_FONT_SIZE = 18
 
@@ -184,7 +188,12 @@ def plot_z_space(
 
 
 def plot_cell_cycle(
-    df_rhythmic, CCG_path="CCG_annotated.csv", ax=None, shift=0, direction=1, shrink=1.5
+    df_rhythmic,
+    CCG_path="CCG_annotated.csv",
+    ax=None,
+    shift=0,
+    direction=1,
+    shrink=1.5,
 ):
     if CCG_path == "CCG_annotated.csv":
         CCG_path = pkg_resources.resource_filename(
@@ -607,33 +616,32 @@ def plot_model_decoded_space(
     fig.suptitle(title, fontsize=TITLE_FONT_SIZE)
 
 
-def plot_phase_distribution(weighted_mean_dict, amplitudes, phases, annotations):
+def plot_phase_distribution(
+    weighted_mean_dict, amplitudes, phases, annotations, ax=None
+):
     # Create a DataFrame for seaborn
-    df = pd.DataFrame(
-        {"amplitude": amplitudes, "phase": phases, "annotation": annotations}
-    )
+    df = pd.DataFrame({"amplitude": amplitudes, "phase": phases, "Phase": annotations})
 
-    palette = sns.color_palette("husl", len(set(annotations)))
-    category_colors = {
-        cat: palette[i] for i, cat in enumerate(sorted(set(annotations)))
-    }
-    plt.figure(figsize=(7, 7))
-    ax = plt.subplot(111, projection="polar")
-
+    if ax is None:
+        plt.figure(figsize=(7, 7))
+        ax = plt.subplot(111, projection="polar")
+    label_order = ["G1", "G1/S", "S", "G2", "G2/M", "M"]
+    color_palette = sns.color_palette("tab10", n_colors=len(label_order))
     sns.scatterplot(
         data=df,
         x="phase",
         y="amplitude",
-        hue="annotation",
-        style="annotation",
+        hue="Phase",
+        style="Phase",
         ax=ax,
         s=100,
-        palette=category_colors,
+        hue_order=["G1", "G1/S", "S", "G2", "G2/M", "M"],
+        palette=color_palette,
     )
 
     # Plot weighted mean directions with matching colors
     for cat, theta in weighted_mean_dict.items():
-        color = category_colors[cat]  # Match category color
+        color = color_palette[label_order.index(cat)]  # Match category color
         r_max = max(amplitudes) * 1.1
         ax.plot(
             [theta, theta],
@@ -656,8 +664,6 @@ def plot_phase_distribution(weighted_mean_dict, amplitudes, phases, annotations)
             va="bottom",
             bbox=dict(facecolor="white", edgecolor=color, boxstyle="round,pad=0.3"),
         )
-
-    plt.show()
 
 
 def plot_posterior(posterior, adata, n=10, i=None, inferred_theta_col="inferred_theta"):
@@ -849,3 +855,366 @@ def plot_PMI(
         )
         # add label to cbar
         cbar.set_label("bits", labelpad=label_pads)
+
+
+def label_panels_mosaic(fig, axes, mosaic, xloc=None, yloc=None, size=16, to_skip=[]):
+    """
+    Labels the panels in a mosaic plot.
+
+    Parameters:
+        - fig: The figure object.
+        - axes: A dictionary of axes objects representing the panels.
+        - xloc: The x-coordinate for the label position (default: 0).
+        - yloc: The y-coordinate for the label position (default: 1.0).
+        - size: The font size of the labels (default: 16).
+    """
+    if xloc is not None:
+        assert len(mosaic) == len(xloc), "One xloc value per row required"
+    else:
+        xloc = [0] * len(mosaic)
+    if yloc is not None:
+        assert len(mosaic) == len(yloc), "One yloc value per row required"
+    else:
+        yloc = [1.0] * len(mosaic)
+
+    for i, key in enumerate(mosaic):
+        mosaic_row = mosaic[i]
+        for key in mosaic_row:
+            if key in to_skip:
+                continue
+            # label physical distance to the left and up:
+            ax = axes[key]
+            if isinstance(ax, list):
+                ax = ax[0]
+            trans = transforms.ScaledTranslation(-20 / 72, 7 / 72, fig.dpi_scale_trans)
+            ax.text(
+                xloc[i],
+                yloc[i],
+                key,
+                transform=ax.transAxes + trans,
+                fontsize=size,
+                va="bottom",
+            )
+
+
+def plot_cell_cycle_validations(
+    model,
+    space_outputs,
+    generative_outputs,
+    adata,
+    layer,
+    genes=["Top2a", "Pcna", "Mki67", "Mcm6"],
+    gene_to_upper=True,
+    hue_key=None,
+    max_n_points=10_000,
+    return_values=False,
+):
+    """
+    Plot the cell cycle validation plots for the given model and data.
+
+    Parameters:
+        model: The trained model object.
+        space_outputs: The outputs from the model's latent space.
+        generative_outputs: The outputs from the model's generative process.
+        adata: The AnnData object containing the data. The gene names should be the symbols of the genes for plot "E".
+        layer: The layer of the AnnData object containing the counts.
+        genes: List of genes to plot. Should be 4 genes, in the set of the context or rhythmic genes.
+        gene_to_upper: If True, convert gene names to uppercase.
+        hue_key: Key in adata.obs to use for coloring the plots.
+        max_n_points: Maximum number of points to plot in the latent space visualization.
+        return_values: If True, return the aligned phases and the posterior entropy distribution.
+
+    Returns:
+        If return_values is True, returns a tuple (fig, axs, fig_space, axs_space, thetas, entropy, context, cells_projected)
+    """
+
+    ##################################
+    ### Inferred phases validation ###
+    ##################################
+
+    #### setup ####
+    if hue_key is not None:
+        hue = adata.obs[hue_key].values
+    else:
+        hue = None
+    if gene_to_upper:
+        genes = [gene.upper() for gene in genes]
+
+    def replace_mosaic_cell_with_grid(fig, axs, label, nrows, ncols):
+        # Extract subplotspec from the original axes
+        original_ax = axs[label]
+        sspec = original_ax.get_subplotspec()
+        fig = original_ax.figure
+        original_ax.remove()
+
+        # Create new inner grid
+        inner = GridSpecFromSubplotSpec(
+            nrows, ncols, subplot_spec=sspec, hspace=0.3, wspace=0.1
+        )
+
+        # Create new axes and store them in a list
+        subaxes = []
+        for r in range(nrows):
+            for c in range(ncols):
+                ax = fig.add_subplot(inner[r, c])
+                ax.spines["top"].set_visible(False)
+                ax.spines["right"].set_visible(False)
+                subaxes.append(ax)
+
+        # Replace entry in axs dict
+        axs[label] = subaxes
+
+        return axs
+
+    mosaic = [
+        ["A", "B"],
+        ["C", "D"],
+        ["E", "F"],
+    ]
+    fig, axs = plt.subplot_mosaic(
+        mosaic,
+        figsize=(16, 24),
+        per_subplot_kw={"E": {"projection": "polar"}},
+        height_ratios=[
+            1.5,
+            1,
+            1,
+        ],
+    )
+    for l in ["A", "B"]:
+        replace_mosaic_cell_with_grid(fig, axs, l, nrows=2, ncols=2)
+    for l in ["C", "D", "F"]:
+        axs[l].spines["top"].set_visible(False)
+        axs[l].spines["right"].set_visible(False)
+
+    #### Get Phases and plot peaking phase of annotated genes ####
+    ax = axs["E"]
+    modify_axis_labels(ax=ax, axis="x", step=0.5, offset=np.pi)
+    thetas = model.orient_align_pseudotimes(space_outputs["theta"], ax=axs["E"])
+
+    #### Plot the selected genes profiles ####
+    for i, gene in enumerate(genes):
+        ax = axs["A"][i]
+        modify_axis_labels(ax=ax, axis="x", step=0.5)
+
+        plot_smoothed_profiles(
+            thetas.detach().numpy(),
+            utils.get_genes_fractions(
+                gene, adata, layer=layer, normalized=True
+            ).flatten(),
+            ax=ax,
+            xlabel="Inferred Phase",
+            ylabel=f"Normalized counts (log)",
+            hue=hue,
+            legend=not bool(i),
+        )
+        ax.set_title(gene)
+
+    #### Plot the modeled fourier contribution of the selected genes ####
+    df_rhythmic = pd.DataFrame(
+        generative_outputs["F"].detach().numpy(), columns=model.context_genes
+    )
+    df_rhythmic["inferred_theta"] = thetas.detach().numpy()
+    for i, gene in enumerate(genes):
+        ax = axs["B"][i]
+        modify_axis_labels(ax=ax, axis="x", step=0.5)
+        plot_smoothed_profiles(
+            thetas.detach().numpy(),
+            df_rhythmic[gene].values.flatten(),
+            ax=ax,
+            xlabel="Inferred Phase",
+            ylabel=f"Modeled F Coeffs (log)",
+            hue=hue,
+            legend=not bool(i),
+        )
+        ax.set_title(gene)
+    #### Plot the histones profiles ####
+    utils.add_histones_fraction(adata=adata, layer=layer, use_only_clustered=True)
+    ax = axs["C"]
+    modify_axis_labels(ax=ax, axis="x", step=0.5)
+    plot_smoothed_profiles(
+        thetas.detach().numpy(),
+        adata.obs["histones_fraction"],
+        ax=ax,
+        hue=hue,
+    )
+    ax.set_ylabel("Histones Fraction (log normalized)")
+    ax.set_xlabel("Inferred Phase")
+
+    #### Plot the library size profiles ####
+    try:
+        library_size = adata.layers[layer].sum(axis=1).A1
+    except:
+        library_size = adata.layers[layer].sum(axis=1)
+    ax = axs["D"]
+    modify_axis_labels(ax=ax, axis="x", step=0.5)
+    plot_smoothed_profiles(
+        thetas.detach().numpy(),
+        library_size,
+        ax=axs["D"],
+        hue=hue,
+    )
+    ax.set_ylabel("Library Size")
+    ax.set_xlabel("Inferred Phase")
+
+    #### Plot the phase posterior entropy distribution ####
+    print("Getting posterior and calculating entropy...")
+    posterior, theta_grid = model.get_posterior(adata, layer_to_use=layer, n_points=20)
+    entropy = utils.normalized_shanon_entropy(posterior)
+    is_cycling = space_outputs["b_z"] > 0.5
+    ax = axs["F"]
+    if not all(is_cycling):
+        modify_axis_labels(ax=ax, axis="x", step=0.5)
+        high_posterior_width = pd.Series(entropy > 0.99, name="High Posterior Width")
+        sns.histplot(x=thetas, hue=high_posterior_width, ax=ax)
+        ax.set_yscale("log")
+        f_legend = (
+            "Distribution of the inferred phases separating cells with high posterior width from others. \n"
+            "(Having cells with high posterior width should be in the G1 area)"
+        )
+
+    else:
+        sns.histplot(x=entropy, ax=ax)
+        # add vertical line at 0.8
+        ax.axvline(0.8, color="red", linestyle="--")
+        ax.set_title("Posterior Entropy Distribution")
+        ax.set_xlabel("Normalized Shannon Entropy")
+        ax.set_xlim([0, 1])
+        f_legend = (
+            "Distribution of the posterior entropy of the inferred phases. \n"
+            "(Having a large fraction of cells above 0.8 suggests that a large fraction of cells are in G0, using the Bernoulli VAE should help (see G0 tutorial).)"
+        )
+
+    fig.tight_layout()
+    label_panels_mosaic(
+        fig,
+        axs,
+        mosaic,
+    )
+    try:
+        display(fig)
+    except:
+        fig.show()
+    # print the legend of the plots
+    print(f"""Validation of the inferred cell cycle phases.
+
+A. Reconstructed gene expression profiles, obtained by binning cells according to inferred phase and averaging 
+log(1 + counts per 10,000) for the indicated gene.
+(You should see: Top2a 2-3 log, peak G2M; Mki67 2-3 log, peak G2M; Pcna 1-2 log, peak S; Mcm6 1-2 log, peak S.
+If Top2a/Mki67 are not in phase and phase shifted with respect to Pcna/Mcm6, the inferred phases are wrong.)
+
+B. Fourier derived predicted gene expression profiles in log
+(You should see: Top2a 2-3 log, peak G2M; Mki67 2-3 log, peak G2M; Pcna 1-2 log, peak S; Mcm6 1-2 log, peak S.)
+
+C. Histone fraction in function of inferred phase.
+(You should see a peak during the S phase (see D and E to determine the S phase).)
+
+D. Library size in function of inferred phase.
+(You should ~see a doubling of the library size.)
+
+E. Scatter plot of the inferred peaking phases and amplitudes of annotated cell cycle genes.
+(You should ~see a progression from G1-G1/S-S-G2-M.)
+
+F. {f_legend}
+""")
+    plt.close(fig)
+
+    ##################################
+    ### Latent space visualization ###
+    ##################################
+
+    ### setup ###
+    mosaic = [
+        ["A", "B", "C"],
+    ]
+    fig_space, axs_space = plt.subplot_mosaic(
+        mosaic,
+        figsize=(16, 6),
+    )
+    for l in mosaic[0]:
+        axs_space[l].spines["top"].set_visible(False)
+        axs_space[l].spines["right"].set_visible(False)
+    context = space_outputs["z"].detach().numpy()
+
+    phase_labels = pd.Series(thetas.detach().numpy())
+    cells_projected = space_outputs["x_projected"].detach().numpy()
+    if context.shape[0] < max_n_points:
+        idx = np.random.choice(context.shape[0], max_n_points, replace=False)
+        context = context[idx]
+        if hue is not None:
+            hue = hue[idx]
+        phase_labels = phase_labels[idx]
+        cells_projected = cells_projected[idx]
+
+    phase_labels.name = "Inferred Phase"
+
+    if context.shape[1] > 2:
+        print("Reducing context space to 2D using UMAP...")
+        reducer = umap.UMAP()
+        context = reducer.fit_transform(context)
+        labels = ["UMAP z 1", "UMAP z 2"]
+    else:
+        labels = ["z1", "z2"]
+
+    ### Latent f space (defines the inferred phase) ###
+    def transform_projected_space(points, phases):
+        x = points[:, 0]
+        y = points[:, 1]
+        r = np.sqrt(x**2 + y**2)
+
+        x_new = r * np.cos(phases)
+        y_new = r * np.sin(phases)
+
+        return np.column_stack([x_new, y_new])
+
+    cells_projected_rotated = transform_projected_space(
+        cells_projected, thetas.detach().numpy()
+    )
+    ax = axs_space["A"]
+    sns.histplot(
+        x=cells_projected_rotated[:, 0], y=cells_projected_rotated[:, 1], ax=ax
+    )
+    ax.set_xlabel("f1")
+    ax.set_ylabel("f2")
+    ax.set_title("Projected f Space")
+
+    ### Latent z space (context space) colored by hue ###
+    ax = axs_space["B"]
+    sns.scatterplot(x=context[:, 0], y=context[:, 1], hue=hue, ax=ax, s=5)
+    ax.set_xlabel(labels[0])
+    ax.set_ylabel(labels[1])
+    ax.set_title("Context Space")
+
+    ### Latent z space (context space) colored by phases ###
+    ax = axs_space["C"]
+    sns.scatterplot(
+        x=context[:, 0], y=context[:, 1], hue=phase_labels, ax=ax, palette="hsv", s=5
+    )
+    ax.set_xlabel(labels[0])
+    ax.set_ylabel(labels[1])
+    ax.set_title("Context Space")
+
+    fig_space.tight_layout()
+    label_panels_mosaic(
+        fig_space,
+        axs_space,
+        mosaic,
+    )
+    try:
+        display(fig_space)
+    except:
+        fig_space.show()
+    plt.close(fig_space)
+    print("""Latent space visualization of the inferred cell cycle phases.
+    
+A. Histogram of the projected f space, which defines the inferred phase. 
+(Seeing an annulus is a good signal, but this depends on the weight of Trainer's closed_circle_weight)
+
+B. Context space colored by the provided hue (if any).
+
+C. Context space colored by the inferred phase. 
+(You should see a ~ random distribution of the inferred phases in the context space, since the mutual
+information between the context and the inferred phase is minimized.)
+""")
+    if return_values:
+        return fig, axs, fig_space, axs_space, thetas, entropy, context, cells_projected

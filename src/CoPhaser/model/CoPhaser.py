@@ -510,7 +510,7 @@ class CoPhaser(nn.Module):
             utils.normalize_angles(phases - origin) * direction + offset
         )
 
-    def _get_origine_direction(self, plot=True, offset=1 / 4 * np.pi):
+    def _get_origine_direction(self, plot=True, offset=1 / 4 * np.pi, ax=None):
         _, categories, mask = self._get_gene_annotation()
         mean_phase, amplitudes, phases = self._get_phase_amplitude_mean(
             mask, categories
@@ -530,6 +530,7 @@ class CoPhaser(nn.Module):
                     phases, mean_phase["G1/S"], best_direction, offset=offset
                 ),
                 categories,
+                ax=ax,
             )
         if not "G1/S" in categories.values:
             warnings.warn(
@@ -551,8 +552,14 @@ class CoPhaser(nn.Module):
             gene_names = self.rhythmic_gene_names
         plotting.plot_fourrier_coefficients(ab_coefficients, gene_names)
 
-    def orient_align_pseudotimes(self, thetas, offset=1 / 4 * np.pi, plot=True):
-        origin, direction = self._get_origine_direction(plot=plot, offset=offset)
+    def orient_align_pseudotimes(
+        self,
+        thetas,
+        offset=1 / 4 * np.pi,
+        plot=True,
+        ax=None,
+    ):
+        origin, direction = self._get_origine_direction(plot=plot, offset=offset, ax=ax)
         # set the mean g1/s at offset
         thetas = self.shift_phases(thetas, origin, direction, offset=offset)
         return thetas
@@ -564,6 +571,7 @@ class CoPhaser(nn.Module):
         isCellCycle=True,
         offset=1 / 4 * np.pi,
         plot=True,
+        ax=None,
     ):
         """
         Infer the pseudotimes of the cells in the adata. If isCellCycle, fixes the origin
@@ -651,7 +659,7 @@ class CoPhaser(nn.Module):
                     non_rhythmic_likelihood_weight=int(use_non_rhythmic),
                 )
                 res[:, i] = log_lik
-        theta_grid = self.orient_align_pseudotimes(theta_grid)
+        theta_grid = self.orient_align_pseudotimes(theta_grid, plot=False)
         if normalize:
             # numerical stability
             res_max, _ = res.max(dim=1, keepdim=True)
@@ -723,6 +731,7 @@ class CoPhaser(nn.Module):
 
     def save(self, file_path: str):
         """Saves the model state and metadata."""
+        self.to(device="cpu")
         init_params = {
             "rhythmic_gene_names": self.rhythmic_gene_names,
             "context_genes": self.context_genes,

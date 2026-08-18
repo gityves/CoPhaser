@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from scipy.spatial.distance import jensenshannon
 from scipy.optimize import differential_evolution
+from scipy import sparse
 from sklearn.metrics import mutual_info_score
 from scipy.stats import circmean
 import anndata
@@ -847,3 +848,66 @@ def fold_change_correction(
     results_df.index = gene_names
 
     return results_df
+
+
+def get_genes_fractions(gene_names, adata, layer="total", normalized=False):
+    """
+    Compute per-cell fraction of counts for a set of genes.
+
+    Parameters
+    ----------
+    gene_names : str or list of str
+        Gene name(s) to compute fractions for. Missing genes are dropped
+        with a warning rather than raising.
+    adata : AnnData
+        Annotated data object.
+    layer : str
+        Layer to use for counts.
+    normalized : bool
+        If True, use normalized counts (log1p fraction*1e4) instead of raw counts. If False, use raw counts.
+
+    Returns
+    -------
+    np.ndarray
+        Array of shape (n_cells, n_genes) with gene fractions. NaN/inf-safe:
+        cells with zero library size get a fraction of 0 instead of NaN/inf.
+    """
+    if layer not in adata.layers:
+        raise KeyError(
+            f"Layer '{layer}' not found in adata.layers. "
+            f"Available layers: {list(adata.layers.keys())}"
+        )
+
+    # Normalize gene_names to a list and check presence
+    if isinstance(gene_names, str):
+        gene_names = [gene_names]
+    gene_names = list(gene_names)
+
+    missing = [g for g in gene_names if g not in adata.var_names]
+    if missing:
+        raise KeyError(f"The following genes are not in adata.var_names: {missing}")
+
+    full_matrix = adata.layers[layer]
+
+    # Library size per cell (works whether full_matrix is sparse or dense)
+    library_size = np.asarray(full_matrix.sum(axis=1)).flatten().astype(float)
+
+    # Subset to genes of interest
+    sub = adata[:, gene_names].layers[layer]
+
+    # Convert to dense ndarray regardless of sparse/dense input
+    if sparse.issparse(sub):
+        sub = sub.toarray()
+    else:
+        sub = np.asarray(sub)
+
+    # Avoid division by zero: cells with zero library size -> fraction 0
+    safe_library_size = np.where(library_size == 0, 1.0, library_size)
+
+    gene_fractions = sub / safe_library_size[:, None]
+    gene_fractions[library_size == 0, :] = 0.0
+
+    if normalized:
+        return np.log1p(gene_fractions * 1e4)
+
+    return gene_fractions

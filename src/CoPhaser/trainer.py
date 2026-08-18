@@ -103,13 +103,51 @@ class Trainer:
         self.MI_detach = MI_detach
 
     @staticmethod
-    def print_loss(losses: dict, epoch, max_epoch, only_total=False):
+    def print_loss(losses: dict, epoch, max_epoch, only_total=False, interpreted=True):
         epoch_str = f"Epoch {epoch + 1}/{max_epoch}"
         if only_total:
-            print(f"{epoch_str}, total_loss: {(np.mean(losses['total_loss'])):.4f}")
+            print(f"{epoch_str}, total_loss: {(np.mean(losses['total_loss'])):.2f}")
         else:
             for key, value in losses.items():
-                epoch_str += f", {key}: {np.mean(value):.4f}"
+                to_add = ""
+                if interpreted:
+                    if key == "entropy_loss_unweighted":
+                        v = np.mean(value)
+                        if v < -3.39:
+                            bin = "uniform"
+                        elif v < -3.38:
+                            bin = "~uniform"
+                        elif v < -3.36:
+                            bin = "slightly non-uniform"
+                        else:
+                            bin = " ⚠ non-uniform"
+                        to_add = f", phase distribution: {bin}"
+                    elif key == "kl_div_f":
+                        v = np.mean(value)
+                        if v < 1:
+                            bin = "too low"
+                        elif v < 3:
+                            bin = "low"
+                        if v < 3:
+                            to_add = f", ⚠ phase certainty: {bin}"
+                    elif key == "fraction_cycling_cells":
+                        v = np.mean(value)
+                        if v != 1:
+                            to_add = f", fraction cycling cells: {v:.2f}"
+                    elif key == "kl_div_z":
+                        v = np.mean(value)
+                        if v > 1000:
+                            to_add = f", ⚠ posterior diverged kl_div_z: {v:.2f}"
+                    elif key == "elbo_loss":
+                        to_add = f", {key}: {np.mean(value):.2f}"
+                    elif key == "MI_loss":
+                        if np.mean(value) > 1:
+                            to_add = f", ⚠ high MI: {np.mean(value):.2f}"
+                    elif key == "total_loss":
+                        to_add = f", (summed losses: {np.mean(value):.2f})"
+                else:
+                    to_add = f", {key}: {np.mean(value):.2f}"
+                epoch_str += to_add
             print(epoch_str)
 
     @staticmethod
@@ -162,6 +200,8 @@ class Trainer:
         batch_size=None,
         print_only_total_loss=False,
         silent=False,
+        helped_training=True,
+        max_repeats=5,
     ):
         self._check_data_loaded()
         if batch_size is None:
@@ -173,76 +213,109 @@ class Trainer:
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         mine_net, mine_optimizer = self._init_mine_network(device)
 
-        losses_training = {}
-        for epoch in range(n_epochs):
-            self.model.train()
-            losses_epoch = {}
+        repeat = True
+        init_model = self.model.state_dict()
+        n_repeats = 0
 
-            self._maybe_unfreeze_layers(epoch)
+        while n_repeats < max_repeats and repeat:
+            repeat = False
+            losses_training = {}
+            if n_repeats > 0:
+                print(f"Starting back training, repeat number {n_repeats}")
+                self.model.load_state_dict(init_model)
 
-            for batch in data_loader:
-                if batch[0].size(0) < batch_size / 2:
-                    continue
+            for epoch in range(n_epochs):
+                self.model.train()
+                losses_epoch = {}
 
-                inputs = self._prepare_batch(batch, device)
-                entropy_loss_weight = self._get_entropy_weight(epoch)
-                optimizer.zero_grad()
+                self._maybe_unfreeze_layers(epoch)
 
-                generative_outputs, inference_outputs = self.model(
-                    inputs["variable_genes"],
-                    inputs["rhythmic_genes"],
-                    inputs["library_size"],
+                for batch in data_loader:
+                    if batch[0].size(0) < batch_size / 2:
+                        continue
+
+                    inputs = self._prepare_batch(batch, device)
+                    entropy_loss_weight = self._get_entropy_weight(epoch)
+                    optimizer.zero_grad()
+
+                    generative_outputs, inference_outputs = self.model(
+                        inputs["variable_genes"],
+                        inputs["rhythmic_genes"],
+                        inputs["library_size"],
+                        epoch,
+                    )
+
+                    loss_dict = self.loss_fn(
+                        model=self.model,
+                        x=inputs["variable_genes"],
+                        epoch=epoch,
+                        generative_outputs=generative_outputs,
+                        inference_outputs=inference_outputs,
+                        MINE_model=mine_net,
+                        entropy_loss_weight=entropy_loss_weight,
+                        entropy_per_batch=self.calculate_entropy_per_batch,
+                        L2_Z_decoder_loss_weight=self.L2_Z_decoder_loss_weight,
+                        MI_weight=self.MI_weight,
+                        rhythmic_likelihood_weight=self.rhythmic_likelihood_weight,
+                        non_rhythmic_likelihood_weight=self.non_rhythmic_likelihood_weight,
+                        closed_circle_weight=self.closed_circle_weight,
+                        noise_model=self.noise_model,
+                        beta_kl_f=self.beta_kl_f,
+                        beta_kl_cycling_status=self.beta_kl_cycling_status,
+                        batch_keys=inputs["batch_keys"],
+                        cycling_status_prior=self.cycling_status_prior,
+                        MI_detach=self.MI_detach,
+                    )
+                    loss = loss_dict["total_loss"]
+                    self.record_loss_batches(
+                        losses_batch=loss_dict, losses_epoch=losses_epoch
+                    )
+                    loss.backward()
+
+                    if epoch > 20:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 4.0)
+                    optimizer.step()
+
+                    self._train_mine(
+                        mine_net, mine_optimizer, loss_dict, inference_outputs
+                    )
+
+                self._loss_handling(
                     epoch,
+                    n_epochs,
+                    losses_epoch,
+                    losses_training,
+                    print_only_total_loss,
+                    silent,
+                    helped_training,
                 )
-
-                loss_dict = self.loss_fn(
-                    model=self.model,
-                    x=inputs["variable_genes"],
-                    epoch=epoch,
-                    generative_outputs=generative_outputs,
-                    inference_outputs=inference_outputs,
-                    MINE_model=mine_net,
-                    entropy_loss_weight=entropy_loss_weight,
-                    entropy_per_batch=self.calculate_entropy_per_batch,
-                    L2_Z_decoder_loss_weight=self.L2_Z_decoder_loss_weight,
-                    MI_weight=self.MI_weight,
-                    rhythmic_likelihood_weight=self.rhythmic_likelihood_weight,
-                    non_rhythmic_likelihood_weight=self.non_rhythmic_likelihood_weight,
-                    closed_circle_weight=self.closed_circle_weight,
-                    noise_model=self.noise_model,
-                    beta_kl_f=self.beta_kl_f,
-                    beta_kl_cycling_status=self.beta_kl_cycling_status,
-                    batch_keys=inputs["batch_keys"],
-                    cycling_status_prior=self.cycling_status_prior,
-                    MI_detach=self.MI_detach,
+                if (
+                    helped_training
+                    and epoch == 20
+                    and np.median(losses_training["elbo_loss"][15:]) < 900
+                    and n_repeats < max_repeats
+                ):
+                    factor = np.median(losses_training["elbo_loss"][15:]) / 1000
+                    self.rhythmic_likelihood_weight /= factor
+                    self.non_rhythmic_likelihood_weight /= factor
+                    print(
+                        f"Elbo loss is low, increasing reconstruction weights:"
+                        f"new rhythmic_likelihood_weight={self.rhythmic_likelihood_weight:.2f},"
+                        f"new non_rhythmic_likelihood_weight={self.non_rhythmic_likelihood_weight:.2f}"
+                    )
+                    repeat = True
+                    n_repeats += 1
+                    break
+            if n_repeats == max_repeats:
+                print(
+                    f"Maximum number of repeats ({max_repeats}) reached, stopped automatic tuning."
                 )
-                loss = loss_dict["total_loss"]
-                self.record_loss_batches(
-                    losses_batch=loss_dict, losses_epoch=losses_epoch
-                )
-                loss.backward()
-
-                if epoch > 20:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 4.0)
-                optimizer.step()
-
-                self._train_mine(mine_net, mine_optimizer, loss_dict, inference_outputs)
-
-            self._loss_handling(
-                epoch,
-                n_epochs,
-                losses_epoch,
-                losses_training,
-                print_only_total_loss,
-                silent,
-            )
-
-        if not silent:
-            self.plot_losses(losses_training)
-        else:
-            for k in losses_training.keys():
-                losses_training[k] = losses_training[k][-1]
-            return losses_training
+            if not silent:
+                self.plot_losses(losses_training)
+            else:
+                for k in losses_training.keys():
+                    losses_training[k] = losses_training[k][-1]
+                return losses_training
 
     def _check_data_loaded(self):
         if not self.model.adata_loaded:
@@ -310,6 +383,7 @@ class Trainer:
         losses_training,
         print_only_total_loss,
         silent,
+        helped_training=True,
     ):
         if not silent:
             self.print_loss(
@@ -317,5 +391,6 @@ class Trainer:
                 epoch=epoch,
                 max_epoch=n_epochs,
                 only_total=print_only_total_loss,
+                interpreted=helped_training,
             )
         self.record_losses_epochs(losses_epoch, losses_training, epoch + 1)
