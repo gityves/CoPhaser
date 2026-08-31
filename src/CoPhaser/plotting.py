@@ -908,6 +908,7 @@ def plot_cell_cycle_validations(
     hue_key=None,
     max_n_points=10_000,
     return_values=False,
+    display_labels=True,
 ):
     """
     Plot the cell cycle validation plots for the given model and data.
@@ -923,6 +924,7 @@ def plot_cell_cycle_validations(
         hue_key: Key in adata.obs to use for coloring the plots.
         max_n_points: Maximum number of points to plot in the latent space visualization.
         return_values: If True, return the aligned phases and the posterior entropy distribution.
+        display_labels: If True, display labels on the plots.
 
     Returns:
         If return_values is True, returns a tuple (fig, axs, fig_space, axs_space, thetas, entropy, context, cells_projected)
@@ -1006,7 +1008,7 @@ def plot_cell_cycle_validations(
             xlabel="Inferred Phase",
             ylabel=f"Normalized counts (log)",
             hue=hue,
-            legend=not bool(i),
+            legend=display_labels and not bool(i),
         )
         ax.set_title(gene)
 
@@ -1025,7 +1027,7 @@ def plot_cell_cycle_validations(
             xlabel="Inferred Phase",
             ylabel=f"Modeled F Coeffs (log)",
             hue=hue,
-            legend=not bool(i),
+            legend=display_labels and not bool(i),
         )
         ax.set_title(gene)
     #### Plot the histones profiles ####
@@ -1037,6 +1039,7 @@ def plot_cell_cycle_validations(
         adata.obs["histones_fraction"],
         ax=ax,
         hue=hue,
+        legend=display_labels and not bool(i),
     )
     ax.set_ylabel("Histones Fraction (log normalized)")
     ax.set_xlabel("Inferred Phase")
@@ -1053,6 +1056,7 @@ def plot_cell_cycle_validations(
         library_size,
         ax=axs["D"],
         hue=hue,
+        legend=display_labels and not bool(i),
     )
     ax.set_ylabel("Library Size")
     ax.set_xlabel("Inferred Phase")
@@ -1138,7 +1142,7 @@ F. {f_legend}
 
     phase_labels = pd.Series(thetas.detach().numpy())
     cells_projected = space_outputs["x_projected"].detach().numpy()
-    if context.shape[0] < max_n_points:
+    if context.shape[0] > max_n_points:
         idx = np.random.choice(context.shape[0], max_n_points, replace=False)
         context = context[idx]
         if hue is not None:
@@ -1180,7 +1184,9 @@ F. {f_legend}
 
     ### Latent z space (context space) colored by hue ###
     ax = axs_space["B"]
-    sns.scatterplot(x=context[:, 0], y=context[:, 1], hue=hue, ax=ax, s=5)
+    sns.scatterplot(
+        x=context[:, 0], y=context[:, 1], hue=hue, ax=ax, s=5, legend=display_labels
+    )
     ax.set_xlabel(labels[0])
     ax.set_ylabel(labels[1])
     ax.set_title("Context Space")

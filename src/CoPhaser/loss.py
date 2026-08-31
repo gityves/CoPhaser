@@ -291,43 +291,30 @@ class Loss:
         return mi_loss
 
     @staticmethod
-    def compute_loss(
+    def compute_elbo(
         model,
-        x,
-        epoch,
+        context_genes_raw_counts,
         generative_outputs,
         inference_outputs,
-        MINE_model,
-        entropy_loss_weight,
-        entropy_per_batch,
-        L2_Z_decoder_loss_weight,
-        MI_weight,
         rhythmic_likelihood_weight,
         non_rhythmic_likelihood_weight,
-        closed_circle_weight,
         noise_model: Literal["poisson", "NB", "ZINB"],
         beta_kl_f,
         beta_kl_cycling_status,
         cycling_status_prior,
-        batch_keys=None,
-        MI_detach: Literal["f", "z", "none"] = "f",
+        epoch=200,
     ):
+        dropout_prob = torch.clamp(
+            torch.sigmoid(model.dropout_rate), min=0.01, max=0.99
+        )
         px_rate = generative_outputs["px_rate"]
         theta_dispersion = generative_outputs["theta_dispersion"]
         qz_m = inference_outputs["qz_m"]
         qz_v = inference_outputs["qz_v"]
-        theta = inference_outputs["theta"]
-        mu_theta = torch.arctan2(
-            inference_outputs["mu_theta"][:, 1], inference_outputs["mu_theta"][:, 0]
-        )
-        dropout_prob = torch.clamp(
-            torch.sigmoid(model.dropout_rate), min=0.01, max=0.99
-        )
-
         # Likelihood of the data (Negative Binomial)
         if noise_model == "ZINB":
             log_lik = Loss.log_likelihood_ZINB_weighted(
-                x=x,
+                x=context_genes_raw_counts,
                 px_rate=px_rate,
                 theta_dispersion=theta_dispersion,
                 dropout_prob=dropout_prob,
@@ -338,7 +325,7 @@ class Loss:
             )
         elif noise_model == "NB":
             log_lik = Loss.log_likelihood_NB_weighted(
-                x=x,
+                x=context_genes_raw_counts,
                 px_rate=px_rate,
                 theta_dispersion=theta_dispersion,
                 rhythmic_indices=model.rhythmic_gene_indices,
@@ -350,7 +337,7 @@ class Loss:
         elif noise_model == "poisson":
             """
             log_lik = Loss.log_likelihood_poisson(
-                x=x,
+                x=context_genes_raw_counts,
                 px_rate=px_rate,
                 rhythmic_indices=model.rhythmic_gene_indices,
                 non_rhythmic_indices=model.non_rhythmic_gene_indices,
@@ -361,12 +348,12 @@ class Loss:
             px_rate += 1e-6
             log_like_rhythmic = (
                 Poisson(px_rate[:, model.rhythmic_gene_indices])
-                .log_prob(x[:, model.rhythmic_gene_indices])
+                .log_prob(context_genes_raw_counts[:, model.rhythmic_gene_indices])
                 .sum(dim=-1)
             )
             log_like_non_rhythmic = (
                 Poisson(px_rate[:, model.non_rhythmic_gene_indices])
-                .log_prob(x[:, model.non_rhythmic_gene_indices])
+                .log_prob(context_genes_raw_counts[:, model.non_rhythmic_gene_indices])
                 .sum(dim=-1)
             )
             log_lik = (
@@ -413,6 +400,48 @@ class Loss:
             - kl_divergence_f * beta_kl_f
             - kl_divergence_cycling_status * beta_kl_cycling_status
         )
+        return elbo, kl_divergence_f, kl_divergence_z, cycling_cells
+
+    @staticmethod
+    def compute_loss(
+        model,
+        context_genes_raw_counts,
+        epoch,
+        generative_outputs,
+        inference_outputs,
+        MINE_model,
+        entropy_loss_weight,
+        entropy_per_batch,
+        L2_Z_decoder_loss_weight,
+        MI_weight,
+        rhythmic_likelihood_weight,
+        non_rhythmic_likelihood_weight,
+        closed_circle_weight,
+        noise_model: Literal["poisson", "NB", "ZINB"],
+        beta_kl_f,
+        beta_kl_cycling_status,
+        cycling_status_prior,
+        batch_keys=None,
+        MI_detach: Literal["f", "z", "none"] = "f",
+    ):
+        theta = inference_outputs["theta"]
+        mu_theta = torch.arctan2(
+            inference_outputs["mu_theta"][:, 1], inference_outputs["mu_theta"][:, 0]
+        )
+        elbo, kl_divergence_f, kl_divergence_z, cycling_cells = Loss.compute_elbo(
+            model,
+            context_genes_raw_counts,
+            generative_outputs,
+            inference_outputs,
+            rhythmic_likelihood_weight,
+            non_rhythmic_likelihood_weight,
+            noise_model,
+            beta_kl_f,
+            beta_kl_cycling_status,
+            cycling_status_prior,
+            epoch=epoch,
+        )
+
         loss = torch.mean(-elbo)
         loss_dict = {"elbo_loss": loss.item()}
         loss_dict["kl_div_f"] = kl_divergence_f[cycling_cells].mean()

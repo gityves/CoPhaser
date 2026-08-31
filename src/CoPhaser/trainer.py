@@ -247,7 +247,7 @@ class Trainer:
 
                     loss_dict = self.loss_fn(
                         model=self.model,
-                        x=inputs["variable_genes"],
+                        context_genes_raw_counts=inputs["variable_genes"],
                         epoch=epoch,
                         generative_outputs=generative_outputs,
                         inference_outputs=inference_outputs,
