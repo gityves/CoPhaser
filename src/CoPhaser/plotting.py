@@ -1140,17 +1140,17 @@ F. {f_legend}
         axs_space[l].spines["right"].set_visible(False)
     context = space_outputs["z"].detach().numpy()
 
-    phase_labels = pd.Series(thetas.detach().numpy())
+    phases = pd.Series(thetas.detach().numpy())
     cells_projected = space_outputs["x_projected"].detach().numpy()
     if context.shape[0] > max_n_points:
         idx = np.random.choice(context.shape[0], max_n_points, replace=False)
         context = context[idx]
         if hue is not None:
             hue = hue[idx]
-        phase_labels = phase_labels[idx]
+        phases = phases[idx]
         cells_projected = cells_projected[idx]
 
-    phase_labels.name = "Inferred Phase"
+    phases.name = "Inferred Phase"
 
     if context.shape[1] > 2:
         print("Reducing context space to 2D using UMAP...")
@@ -1171,9 +1171,7 @@ F. {f_legend}
 
         return np.column_stack([x_new, y_new])
 
-    cells_projected_rotated = transform_projected_space(
-        cells_projected, thetas.detach().numpy()
-    )
+    cells_projected_rotated = transform_projected_space(cells_projected, phases)
     ax = axs_space["A"]
     sns.histplot(
         x=cells_projected_rotated[:, 0], y=cells_projected_rotated[:, 1], ax=ax
@@ -1194,7 +1192,7 @@ F. {f_legend}
     ### Latent z space (context space) colored by phases ###
     ax = axs_space["C"]
     sns.scatterplot(
-        x=context[:, 0], y=context[:, 1], hue=phase_labels, ax=ax, palette="hsv", s=5
+        x=context[:, 0], y=context[:, 1], hue=phases, ax=ax, palette="hsv", s=5
     )
     ax.set_xlabel(labels[0])
     ax.set_ylabel(labels[1])
@@ -1223,4 +1221,4 @@ C. Context space colored by the inferred phase.
 information between the context and the inferred phase is minimized.)
 """)
     if return_values:
-        return fig, axs, fig_space, axs_space, thetas, entropy, context, cells_projected
+        return fig, axs, fig_space, axs_space, phases, entropy, context, cells_projected
