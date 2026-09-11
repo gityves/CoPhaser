@@ -470,7 +470,9 @@ class Loss:
         loss_dict["entropy_loss_unweighted"] = H_loss.item() / entropy_loss_weight
         loss_dict["entropy_loss"] = H_loss.item()
 
-        radii = torch.norm(inference_outputs["x_projected"][cycling_cells], dim=1)
+        radii = torch.sqrt(
+            (inference_outputs["x_projected"][cycling_cells] ** 2).sum(dim=1) + 1e-8
+        )
         radial_variance_loss = torch.var(radii) * closed_circle_weight
         circle_deviation_loss = torch.mean((radii - 1) ** 2) * closed_circle_weight
 

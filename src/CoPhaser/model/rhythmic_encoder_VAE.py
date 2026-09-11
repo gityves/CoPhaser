@@ -53,7 +53,8 @@ class RhythmicEncoderVAE(FreezableModule):
         h = self.fc1(x_norm)
         h = self.fc2(h)
         x_projected = self.fc_mu(h)
-        mu = x_projected / x_projected.norm(dim=-1, keepdim=True)
+        norm = torch.sqrt((x_projected**2).sum(dim=-1, keepdim=True) + 1e-8)
+        mu = x_projected / norm
         return mu, x_projected
 
     def normalize_expression(

@@ -373,6 +373,7 @@ class Trainer:
                 inference_outputs["z"].detach(),
             )
             (-mi_loss).backward()
+            # torch.nn.utils.clip_grad_norm_(mine_net.parameters(), 4.0)
             mine_optimizer.step()
 
     def _loss_handling(
