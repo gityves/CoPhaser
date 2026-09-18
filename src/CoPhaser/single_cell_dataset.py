@@ -9,6 +9,8 @@ class SingleCellDataset(Dataset):
         variable_genes: torch.Tensor,
         library_size: torch.Tensor,
         batch_keys: torch.Tensor = None,
+        phase_prior: torch.Tensor = None,
+        phase_prior_kappa: torch.Tensor = None,
     ):
         """
         Initialize the dataset with the rhythmic genes, variable genes, and library size.
@@ -22,11 +24,19 @@ class SingleCellDataset(Dataset):
             The variable genes counts for each cell.
         library_size : torch.Tensor
             The library size for each cell.
+        phase_prior : torch.Tensor, optional
+            Prior phase angle for each cell, e.g. from marker-based scoring. Optional, and
+            like batch_keys it is returned as an empty tensor when absent.
+        phase_prior_kappa : torch.Tensor, optional
+            Concentration of that prior, one value per cell, so a per-cell confidence
+            survives shuffling into batches. Zero means the cell has no prior.
         """
         self.rhythmic_genes = rhythmic_genes
         self.variable_genes = variable_genes
         self.library_size = library_size
         self.batch_keys = batch_keys
+        self.phase_prior = phase_prior
+        self.phase_prior_kappa = phase_prior_kappa
 
     def __len__(self):
         return len(self.rhythmic_genes)
@@ -39,6 +49,12 @@ class SingleCellDataset(Dataset):
             self.variable_genes[idx],
             self.library_size[idx],
             self.batch_keys[idx] if self.batch_keys is not None else empty_tensor,
+            self.phase_prior[idx] if self.phase_prior is not None else empty_tensor,
+            (
+                self.phase_prior_kappa[idx]
+                if self.phase_prior_kappa is not None
+                else empty_tensor
+            ),
         )
 
 
