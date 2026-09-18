@@ -3,6 +3,8 @@ from torch.distributions import kl_divergence as kl
 from typing import Literal
 import torch
 
+from CoPhaser.powerSpherical import PowerSpherical
+
 
 class Loss:
     """Loss functions for CoPhaser."""
@@ -423,6 +425,9 @@ class Loss:
         cycling_status_prior,
         batch_keys=None,
         MI_detach: Literal["f", "z", "none"] = "f",
+        phase_prior_direction=None,
+        phase_prior_kappa=None,
+        phase_prior_weight=2.0,
     ):
         theta = inference_outputs["theta"]
         mu_theta = torch.arctan2(
@@ -496,6 +501,32 @@ class Loss:
         ) * min(epoch / 20, 1)
         loss += MI_loss
         loss_dict["MI_loss"] = MI_loss.item() / MI_weight
+
+        # Informative prior on the phase, annealed away by the trainer (phase_prior_kappa reaches 0).
+        has_prior = (
+            phase_prior_direction is not None
+            and phase_prior_kappa is not None
+            and bool((phase_prior_kappa > 0).any())
+        )
+        if has_prior:
+            keep = cycling_cells & (phase_prior_kappa > 0)
+        if has_prior and bool(keep.any()):
+            theta_sample = inference_outputs["theta"][keep]
+            sampled_direction = torch.stack(
+                [torch.cos(theta_sample), torch.sin(theta_sample)], dim=-1
+            )
+            prior_dist = PowerSpherical(
+                phase_prior_direction[keep],
+                phase_prior_kappa[keep].to(theta_sample.device),
+            )
+            dot = (phase_prior_direction[keep] * sampled_direction).sum(-1)
+            dot = dot.clamp(min=-1.0 + 1e-6)
+            log_prob = prior_dist.log_normalizer() + prior_dist.scale * torch.log1p(dot)
+            phase_prior_loss = -log_prob.mean()
+            weighted_prior = phase_prior_loss * float(phase_prior_weight)
+            loss += weighted_prior
+            loss_dict["phase_prior_loss"] = phase_prior_loss.item()
+            loss_dict["phase_prior_loss_weighted"] = weighted_prior.item()
 
         loss_dict["total_loss"] = loss
         return loss_dict

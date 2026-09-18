@@ -97,7 +97,7 @@ class CoPhaser(nn.Module):
         if force_context_genes_order is not None:
             self.context_genes = force_context_genes_order
         else:
-            self.context_genes = list(set(context_genes) | set(rhythmic_gene_names))
+            self.context_genes = sorted(set(context_genes) | set(rhythmic_gene_names))
         n_variable_genes = len(self.context_genes)
         self.rhythmic_gene_indices = [
             self.context_genes.index(x) for x in self.rhythmic_gene_names
@@ -188,6 +188,63 @@ class CoPhaser(nn.Module):
         self.n_batches = batches.max() + 1
         self.batch_corrected = True
 
+    def add_phase_prior(self, adata, phase_prior_field, phase_prior_kappa=2.0):
+        """
+        Attach an informative prior on the phase, one angle per cell, from `adata.obs`.
+
+        Like the batch field this is a property of the data rather than of the training run,
+        so it is loaded with the counts and travels with the cells through batching.
+
+        ----------
+        Parameters
+        ----------
+        adata: anndata object
+            Must carry the prior in `.obs`, in the same cell order as the counts.
+        phase_prior_field: str
+            `.obs` column holding the prior phase angle in radians. Cells whose value is NaN
+            get no prior, so a prior that is only known for part of the sample is allowed.
+        phase_prior_kappa: str or float
+            How confident the prior is: a `.obs` column for a per-cell concentration, or one
+            number for all cells. Larger is tighter (kappa 0 means no prior on that cell, and
+            NaN is read as 0). A per-cell kappa is the way to say that some cells are scored
+            confidently and others are not.
+        """
+        if phase_prior_field not in adata.obs:
+            raise ValueError(
+                f"phase_prior_field '{phase_prior_field}' is not a column of adata.obs."
+            )
+        angles = np.asarray(adata.obs[phase_prior_field], dtype=float)
+
+        if isinstance(phase_prior_kappa, str):
+            if phase_prior_kappa not in adata.obs:
+                raise ValueError(
+                    f"phase_prior_kappa '{phase_prior_kappa}' is not a column of adata.obs. "
+                    "Pass a number instead to use one concentration for every cell."
+                )
+            kappa = np.asarray(adata.obs[phase_prior_kappa], dtype=float)
+        else:
+            kappa = np.full(adata.n_obs, float(phase_prior_kappa), dtype=float)
+        if np.any(kappa[np.isfinite(kappa)] < 0):
+            raise ValueError("phase_prior_kappa must be non-negative.")
+
+        # A cell with no angle cannot have a prior whatever its kappa says, and NaN kappa is
+        # read as "no prior" rather than as an error - both are how a partial prior arrives.
+        kappa = np.where(np.isfinite(kappa), kappa, 0.0)
+        kappa = np.where(np.isfinite(angles), kappa, 0.0)
+        angles = np.where(np.isfinite(angles), angles, 0.0)
+        # Wrap to (-pi, pi]: the loss only ever uses cos/sin of this, but keeping it canonical
+        # makes the stored value comparable with the inferred theta.
+        angles = np.arctan2(np.sin(angles), np.cos(angles))
+
+        if not (kappa > 0).any():
+            raise ValueError(
+                f"No cell has a usable phase prior: every value of '{phase_prior_field}' is "
+                "NaN, or the concentration is zero everywhere."
+            )
+        self.phase_prior = torch.tensor(angles, dtype=torch.float32)
+        self.phase_prior_kappa = torch.tensor(kappa, dtype=torch.float32)
+        self.phase_prior_loaded = True
+
     def _get_library_size_rhythmic_var_genes(
         self,
         adata: anndata.AnnData,
@@ -232,6 +289,8 @@ class CoPhaser(nn.Module):
         layer_to_use: str,
         batch_name: str = None,
         library_size_field: str = None,
+        phase_prior_field: str = None,
+        phase_prior_kappa=2.0,
     ):
         """
         Load anndata object and extract the gene expression matrix, library size, for rhythmic genes and variable genes.
@@ -249,6 +308,11 @@ class CoPhaser(nn.Module):
             The layer to use for gene expression.
         batch: str
             The adata.obs column containing the batch, if any.
+        phase_prior_field: str, optional
+            The adata.obs column containing a prior phase angle in radians per cell, if any.
+            See add_phase_prior.
+        phase_prior_kappa: str or float, optional
+            Concentration of that prior: an adata.obs column, or one number for every cell.
         """
         adata = adata.copy()
         (
@@ -265,6 +329,14 @@ class CoPhaser(nn.Module):
             self.add_batch(adata, batch_name)
         else:
             self.batch_corrected = False
+
+        # phase prior handling
+        if phase_prior_field is not None:
+            self.add_phase_prior(adata, phase_prior_field, phase_prior_kappa)
+        else:
+            self.phase_prior = None
+            self.phase_prior_kappa = None
+            self.phase_prior_loaded = False
 
         self.adata_loaded = True
 
@@ -572,6 +644,7 @@ class CoPhaser(nn.Module):
         offset=1 / 4 * np.pi,
         plot=True,
         ax=None,
+        library_size_field: str = None,
     ):
         """
         Infer the pseudotimes of the cells in the adata. If isCellCycle, fixes the origin
@@ -579,7 +652,9 @@ class CoPhaser(nn.Module):
         """
         adata = adata.copy()
         library_size, rhythmic_genes, variable_genes, mean_genes = (
-            self._get_library_size_rhythmic_var_genes(adata, layer_to_use)
+            self._get_library_size_rhythmic_var_genes(
+                adata, layer_to_use, library_size_field
+            )
         )
         self.to(device="cpu")
         with torch.no_grad():
@@ -591,6 +666,38 @@ class CoPhaser(nn.Module):
             return thetas
         return self.orient_align_pseudotimes(thetas, offset=offset, plot=plot)
 
+    def _get_posterior_batch_size(self, n_cells, n_genes, device):
+        """
+        Estimate how many cells get_posterior can process at once without saturating the
+        memory available on `device`. Looks at free GPU memory (torch.cuda.mem_get_info)
+        for a cuda device, or available system RAM (via psutil, if installed) for cpu.
+        Falls back to processing all cells at once if the available memory cannot be
+        determined.
+        """
+        safety_fraction = 0.3
+        # rough number of (n_cells x n_genes) float32 tensors alive at once per theta step
+        # (px_rate, theta_dispersion, F, rhythmic_expanded, context_mean_shifts, ...)
+        tensors_per_step = 10
+        bytes_per_cell = max(n_genes, 1) * 4 * tensors_per_step
+
+        available_bytes = None
+        if str(device).startswith("cuda") and torch.cuda.is_available():
+            free_bytes, _total_bytes = torch.cuda.mem_get_info(device)
+            available_bytes = free_bytes
+        else:
+            try:
+                import psutil
+
+                available_bytes = psutil.virtual_memory().available
+            except ImportError:
+                available_bytes = None
+
+        if available_bytes is None:
+            return n_cells
+
+        batch_size = int((available_bytes * safety_fraction) // bytes_per_cell)
+        return max(1, min(batch_size, n_cells))
+
     def get_posterior(
         self,
         adata: anndata.AnnData,
@@ -598,7 +705,9 @@ class CoPhaser(nn.Module):
         n_points: int,
         use_non_rhythmic=False,
         normalize=True,
-        device="cuda",
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        library_size_field: str = None,
+        batch_size: int = None,
     ):
         """
         Method to compute the exact posterior over a grid of angles for each cell.
@@ -617,6 +726,12 @@ class CoPhaser(nn.Module):
             If True, normalizes the posterior to sum to 1.
         device: str
             Device to use for computation.
+        library_size_field: str
+            As in load_anndata
+        batch_size: int
+            Number of cells to process at once. If None (default), a batch size is picked
+            automatically from the memory currently available on `device` (free GPU memory,
+            or system RAM via psutil on cpu) so large datasets don't saturate it.
 
         Returns
         -------
@@ -628,37 +743,55 @@ class CoPhaser(nn.Module):
         adata = adata.copy()
         self.to(device)
         library_size, rhythmic_genes, variable_genes, mean_genes = (
-            self._get_library_size_rhythmic_var_genes(adata, layer_to_use)
+            self._get_library_size_rhythmic_var_genes(
+                adata, layer_to_use, library_size_field
+            )
         )
         library_size = library_size.to(device)
         variable_genes = variable_genes.to(device)
         rhythmic_genes = rhythmic_genes.to(device)
 
-        with torch.no_grad():
-            # use the maximum of the variational posterior of z
-            generative, space = self.forward(
-                variable_genes, rhythmic_genes, library_size, -1, use_max_posterior=True
+        n_cells = variable_genes.shape[0]
+        if batch_size is None:
+            batch_size = self._get_posterior_batch_size(
+                n_cells, variable_genes.shape[1], device
             )
-            z = space["z"]
-            b_z = space["b_z"]
-            _lambda = generative["lambda"]
-            f_g1 = space["f_g1"]
-            res = torch.zeros((z.shape[0], n_points), device=device)
-            theta_grid = np.linspace(-np.pi, np.pi, n_points)
-            for i, theta in tqdm.tqdm(enumerate(theta_grid), total=n_points):
-                thetas = torch.full((z.shape[0],), theta, device=device)
-                f = self.rhythmic_encoder.fourier_basis_expansion(thetas)
-                pred = self.generative(f, z, b_z, _lambda, library_size, f_g1)
-                log_lik = Loss.log_likelihood_NB_weighted(
-                    x=variable_genes,
-                    px_rate=pred["px_rate"],
-                    theta_dispersion=pred["theta_dispersion"],
-                    rhythmic_indices=self.rhythmic_gene_indices,
-                    non_rhythmic_indices=self.non_rhythmic_gene_indices,
-                    rhythmic_likelihood_weight=1,
-                    non_rhythmic_likelihood_weight=int(use_non_rhythmic),
+
+        theta_grid = np.linspace(-np.pi, np.pi, n_points)
+        res = torch.zeros((n_cells, n_points), device=device)
+        with torch.no_grad():
+            for start in tqdm.tqdm(range(0, n_cells, batch_size)):
+                end = min(start + batch_size, n_cells)
+                batch_library_size = library_size[start:end]
+                batch_variable_genes = variable_genes[start:end]
+                batch_rhythmic_genes = rhythmic_genes[start:end]
+
+                # use the maximum of the variational posterior of z
+                generative, space = self.forward(
+                    batch_variable_genes,
+                    batch_rhythmic_genes,
+                    batch_library_size,
+                    -1,
+                    use_max_posterior=True,
                 )
-                res[:, i] = log_lik
+                z = space["z"]
+                b_z = space["b_z"]
+                _lambda = generative["lambda"]
+                f_g1 = space["f_g1"]
+                for i, theta in enumerate(theta_grid):
+                    thetas = torch.full((z.shape[0],), theta, device=device)
+                    f = self.rhythmic_encoder.fourier_basis_expansion(thetas)
+                    pred = self.generative(f, z, b_z, _lambda, batch_library_size, f_g1)
+                    log_lik = Loss.log_likelihood_NB_weighted(
+                        x=batch_variable_genes,
+                        px_rate=pred["px_rate"],
+                        theta_dispersion=pred["theta_dispersion"],
+                        rhythmic_indices=self.rhythmic_gene_indices,
+                        non_rhythmic_indices=self.non_rhythmic_gene_indices,
+                        rhythmic_likelihood_weight=1,
+                        non_rhythmic_likelihood_weight=int(use_non_rhythmic),
+                    )
+                    res[start:end, i] = log_lik
         theta_grid = self.orient_align_pseudotimes(theta_grid, plot=False)
         if normalize:
             # numerical stability
