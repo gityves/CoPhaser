@@ -7,8 +7,8 @@ import seaborn as sns
 import pandas as pd
 from typing import Literal
 
+from CoPhaser._resources import resource_path
 from CoPhaser import utils
-import pkg_resources
 
 
 import numpy as np
@@ -196,9 +196,7 @@ def plot_cell_cycle(
     shrink=1.5,
 ):
     if CCG_path == "CCG_annotated.csv":
-        CCG_path = pkg_resources.resource_filename(
-            __name__, f"resources/CCG_annotated.csv"
-        )
+        CCG_path = resource_path("CCG_annotated.csv")
     df_ccg = pd.read_csv(CCG_path, index_col=0)
     df_phase_ptp = utils.get_ptp_phase(df_rhythmic)
     df_phase_ptp.index = df_phase_ptp.index.str.upper()
@@ -712,6 +710,101 @@ def plot_feature_importance(importance: torch.Tensor, rhythmic_gene_names):
     plt.tight_layout()
 
 
+def project_and_rotate_f_space(points, phases):
+    """Rotate 2D projected-f-space points so their angle is the inferred phase.
+
+    Used by ``plot_cell_cycle_validations`` and reusable standalone for the
+    "projected cycle space" panel of non-cell-cycle results (circadian,
+    somite, menstrual), which don't have a bespoke validation function.
+    """
+    x = points[:, 0]
+    y = points[:, 1]
+    r = np.sqrt(x**2 + y**2)
+
+    x_new = r * np.cos(phases)
+    y_new = r * np.sin(phases)
+
+    return np.column_stack([x_new, y_new])
+
+
+def plot_r2_polar_scatter(
+    r2_df: pd.DataFrame,
+    selected_genes,
+    min_r2: float = 0.1,
+    n_bins: int = 24,
+    top_n_per_bin: int = 10,
+    n_all_genes_shown: int = 1000,
+    ax=None,
+):
+    """Polar scatter of per-gene cyclic R^2 vs. peaking phase.
+
+    ``r2_df`` is the output of ``CoPhaser.cyclic_r2.fit_cyclic_r2_celltypes``
+    (columns "gene", "r2", "peak_phase"), computed independently of which
+    genes were used as the model's rhythmic set. Genes in ``selected_genes``
+    (the model's ``rhythmic_gene_names``) are highlighted as "Selected";
+    genes that are *not* selected but still clear ``min_r2`` are labeled as
+    candidates that might be worth adding to the rhythmic gene set.
+    """
+    from adjustText import adjust_text
+
+    if ax is None:
+        fig, ax = plt.subplots(subplot_kw={"projection": "polar"})
+    else:
+        fig = ax.figure
+
+    ax.scatter(
+        r2_df.head(n_all_genes_shown)["peak_phase"],
+        r2_df.head(n_all_genes_shown)["r2"],
+        alpha=0.5,
+        label="All",
+    )
+
+    i_selected = r2_df["gene"].isin(selected_genes)
+    ax.scatter(
+        r2_df.loc[i_selected, "peak_phase"],
+        r2_df.loc[i_selected, "r2"],
+        alpha=0.5,
+        label="Selected",
+    )
+
+    bin_edges = np.linspace(0, 2 * np.pi, n_bins + 1)
+
+    def top_per_phase_bin(df):
+        df = df.copy()
+        df["phase_bin"] = pd.cut(df["peak_phase"], bins=bin_edges, include_lowest=True)
+        return df.groupby("phase_bin", observed=True, group_keys=False).apply(
+            lambda g: g.nlargest(top_n_per_bin, "r2")
+        )
+
+    labelled = [
+        (top_per_phase_bin(r2_df.loc[i_selected]), "0.45", 2),
+        (
+            top_per_phase_bin(r2_df.loc[(r2_df["r2"] > min_r2) & (~i_selected)]),
+            "black",
+            3,
+        ),
+    ]
+
+    texts = [
+        ax.annotate(
+            row["gene"],
+            (row["peak_phase"], row["r2"]),
+            fontsize=7,
+            color=color,
+            zorder=zorder,
+        )
+        for df_to_label, color, zorder in labelled
+        for _, row in df_to_label.iterrows()
+    ]
+    if texts:
+        adjust_text(texts, ax=ax, arrowprops=dict(arrowstyle="-", color="gray", lw=0.5))
+
+    ax.set_xticklabels([])
+    ax.set_title("R² vs Peak Phase")
+    ax.legend()
+    return fig, ax
+
+
 def plot_fourrier_coefficients(ab_coefficients, gene_names):
     # Compute amplitude and phase
     a = ab_coefficients[:, 0]
@@ -897,6 +990,270 @@ def label_panels_mosaic(fig, axes, mosaic, xloc=None, yloc=None, size=16, to_ski
             )
 
 
+def _replace_mosaic_cell_with_grid(fig, axs, label, nrows, ncols):
+    """Subdivide one mosaic cell into an nrows x ncols grid, replacing axs[label] with the
+    list of sub-axes. Extracted from plot_cell_cycle_validations so the circadian panel
+    can lay its A/B cells out the same way."""
+    original_ax = axs[label]
+    sspec = original_ax.get_subplotspec()
+    fig = original_ax.figure
+    original_ax.remove()
+
+    inner = GridSpecFromSubplotSpec(
+        nrows, ncols, subplot_spec=sspec, hspace=0.3, wspace=0.1
+    )
+
+    subaxes = []
+    for r in range(nrows):
+        for c in range(ncols):
+            ax = fig.add_subplot(inner[r, c])
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            subaxes.append(ax)
+
+    axs[label] = subaxes
+    return axs
+
+
+# Genes that go by two names in different annotations - looking a gene up should find it
+# under either. Kept deliberately small: only pairs that actually show up in the packaged
+# rhythmic gene sets.
+GENE_ALIASES = {"BMAL1": "ARNTL", "ARNTL": "BMAL1"}
+
+
+def resolve_display_genes(requested, available, fallback_genes=(), n_genes=4, seed=0):
+    """Pick ``n_genes`` genes to plot, tolerating genes the dataset doesn't have.
+
+    A requested gene is kept if it (or its alias, e.g. Bmal1/Arntl) is in ``available``,
+    matched case-insensitively and returned with the spelling ``available`` uses. Each
+    gene that can't be found is replaced by a random one drawn from ``fallback_genes``
+    (the rhythmic gene set) that is not already shown. If there still aren't enough, the
+    result is padded with ``None`` - the caller leaves those panels blank rather than
+    plotting a gene the data doesn't have.
+
+    Returns a list of length ``n_genes`` whose entries are gene names or None.
+    """
+    by_upper = {}
+    for gene in available:
+        by_upper.setdefault(str(gene).upper(), gene)
+
+    def lookup(gene):
+        key = str(gene).upper()
+        for candidate in (key, GENE_ALIASES.get(key)):
+            if candidate is not None and candidate in by_upper:
+                return by_upper[candidate]
+        return None
+
+    resolved, taken = [], set()
+    for gene in list(requested)[:n_genes]:
+        found = lookup(gene)
+        if found is not None and found not in taken:
+            resolved.append(found)
+            taken.add(found)
+        else:
+            resolved.append(None)
+
+    spare = []
+    for gene in fallback_genes:
+        found = lookup(gene)
+        if found is not None and found not in taken:
+            spare.append(found)
+            taken.add(found)
+    # Random, but reproducible: the same dataset always yields the same filler genes, so
+    # a re-run of the same fit doesn't silently swap the panels around.
+    np.random.default_rng(seed).shuffle(spare)
+
+    filled = [
+        g if g is not None else (spare.pop(0) if spare else None) for g in resolved
+    ]
+    filled += [None] * (n_genes - len(filled))
+    return filled[:n_genes]
+
+
+def first_harmonic_amp_phase(model):
+    """Amplitude and peak phase of each rhythmic gene's fitted first harmonic.
+
+    The rhythmic decoder's Fourier coefficients are the fit: columns 0 and 1 are the
+    first harmonic's cosine and sine terms, so amplitude is their norm and the peaking
+    phase their angle. The decoder covers ``context_genes`` when it was built for all
+    genes, and only ``rhythmic_gene_names`` otherwise - either way, only the rhythmic
+    genes are returned.
+    """
+    weights = model.rhythmic_decoder.fourier_coefficients.weight.detach().cpu().numpy()
+    decoder_genes = (
+        model.context_genes
+        if getattr(model, "rhythmic_decoder_to_all_genes", False)
+        else model.rhythmic_gene_names
+    )
+    index_of = {str(g).upper(): i for i, g in enumerate(decoder_genes)}
+
+    names, amps, phases = [], [], []
+    for gene in model.rhythmic_gene_names:
+        i = index_of.get(str(gene).upper())
+        if i is None:
+            continue
+        a, b = weights[i, 0], weights[i, 1]
+        names.append(gene)
+        amps.append(float(np.sqrt(a**2 + b**2)))
+        phases.append(float(np.arctan2(b, a)))
+    return names, np.asarray(amps), np.asarray(phases)
+
+
+def plot_circadian_validations(
+    model,
+    space_outputs,
+    generative_outputs,
+    adata,
+    layer,
+    genes=("Dbp", "Per2", "Bmal1", "Cry1"),
+    hue_key=None,
+    return_values=False,
+    display_labels=True,
+):
+    """Validation panel for an inferred circadian phase, mirroring
+    ``plot_cell_cycle_validations``' A/B panels and replacing the cell-cycle-specific
+    ones with a phase distribution and the fitted clock structure.
+
+    A. Observed profiles of four clock genes against the inferred phase.
+    B. The model's own Fourier-derived profiles for the same genes.
+    C. Distribution of the inferred phases (split by ``hue_key`` when given).
+    D. Fitted first-harmonic amplitude and peaking phase of every rhythmic gene - the
+       relative ordering around the circle is the part to read, since the origin and
+       direction of the inferred phase are arbitrary.
+    """
+    hue = adata.obs[hue_key].values if hue_key is not None else None
+    genes = resolve_display_genes(
+        genes, adata.var_names, fallback_genes=model.rhythmic_gene_names, n_genes=4
+    )
+
+    mosaic = [["A", "B"], ["C", "D"]]
+    fig, axs = plt.subplot_mosaic(
+        mosaic,
+        figsize=(16, 16),
+        per_subplot_kw={"D": {"projection": "polar"}},
+        height_ratios=[1.5, 1],
+    )
+    for label in ("A", "B"):
+        _replace_mosaic_cell_with_grid(fig, axs, label, nrows=2, ncols=2)
+    axs["C"].spines["top"].set_visible(False)
+    axs["C"].spines["right"].set_visible(False)
+
+    thetas = space_outputs["theta"].detach().numpy()
+
+    #### A: observed profiles ####
+    for i, gene in enumerate(genes):
+        ax = axs["A"][i]
+        if gene is None:
+            ax.axis("off")
+            continue
+        modify_axis_labels(ax=ax, axis="x", step=0.5)
+        plot_smoothed_profiles(
+            thetas,
+            utils.get_genes_fractions(
+                gene, adata, layer=layer, normalized=True
+            ).flatten(),
+            ax=ax,
+            xlabel="Inferred Phase",
+            ylabel="Normalized counts (log)",
+            hue=hue,
+            legend=display_labels and not bool(i),
+        )
+        ax.set_title(gene)
+
+    #### B: the model's Fourier-derived profiles for the same genes ####
+    df_rhythmic = pd.DataFrame(
+        generative_outputs["F"].detach().numpy(), columns=model.context_genes
+    )
+    for i, gene in enumerate(genes):
+        ax = axs["B"][i]
+        if gene is None or gene not in df_rhythmic.columns:
+            ax.axis("off")
+            continue
+        modify_axis_labels(ax=ax, axis="x", step=0.5)
+        plot_smoothed_profiles(
+            thetas,
+            df_rhythmic[gene].values.flatten(),
+            ax=ax,
+            xlabel="Inferred Phase",
+            ylabel="Modeled F Coeffs (log)",
+            hue=hue,
+            legend=display_labels and not bool(i),
+        )
+        ax.set_title(gene)
+
+    #### C: distribution of the inferred phases ####
+    ax = axs["C"]
+    modify_axis_labels(ax=ax, axis="x", step=0.5)
+    sns.histplot(
+        x=thetas,
+        hue=pd.Series(hue, name=hue_key) if hue is not None else None,
+        bins=40,
+        ax=ax,
+        legend=display_labels and hue is not None,
+    )
+    ax.set_xlim(-np.pi, np.pi)
+    ax.set_xlabel("Inferred Phase")
+    ax.set_ylabel("Cells")
+    ax.set_title("Distribution of inferred phases")
+
+    #### D: fitted clock structure ####
+    ax = axs["D"]
+    names, amps, phases = first_harmonic_amp_phase(model)
+    ax.scatter(phases, amps, s=45, alpha=0.75)
+    # Low-amplitude genes all sit near the origin, so at a readable font size their labels
+    # overlap badly - push them apart with adjustText, as the R2 panel does, with a
+    # stronger repulsion and more room to move than the defaults allow (the labels are
+    # bigger here, and there are far fewer of them, so they can afford to travel).
+    texts = [
+        ax.annotate(name, (phase, amp), fontsize=12)
+        for name, amp, phase in zip(names, amps, phases)
+    ]
+    if texts:
+        from adjustText import adjust_text
+
+        adjust_text(
+            texts,
+            ax=ax,
+            force_text=(0.5, 0.8),
+            expand=(1.3, 1.6),
+            max_move=None,
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.6),
+        )
+    ax.set_title("Fitted clock structure (first harmonic)", va="bottom")
+    ax.set_xticklabels([])
+
+    fig.tight_layout()
+    label_panels_mosaic(fig, axs, mosaic)
+    try:
+        display(fig)
+    except Exception:
+        fig.show()
+
+    print("""Validation of the inferred circadian phases.
+
+A. Reconstructed gene expression profiles, obtained by binning cells according to inferred
+phase and averaging log(1 + counts per 10,000) for the indicated gene.
+(You should see a clear oscillation for each clock gene, with Dbp/Per2 peaking together
+and roughly antiphase to Bmal1.)
+
+B. Fourier derived predicted gene expression profiles in log, for the same genes.
+(These should oscillate in the same phase as the corresponding panel in A.)
+
+C. Distribution of the inferred phases.
+(Cells should cover the whole cycle. A strong pile-up in one place, or a split that tracks
+the hue rather than the phase, means the fit is driven by something other than the clock.)
+
+D. Fitted first harmonic of every rhythmic gene: peaking phase as the angle, amplitude as
+the radius.
+(You should see the canonical clock ordering - Dbp/Per3/Ciart/Nr1d1 grouped together and
+roughly opposite Bmal1/Npas2. The absolute position on the circle is meaningless, only the
+relative arrangement is.)""")
+
+    if return_values:
+        return fig, axs, thetas, genes
+    return fig
+
+
 def plot_cell_cycle_validations(
     model,
     space_outputs,
@@ -942,31 +1299,11 @@ def plot_cell_cycle_validations(
     if gene_to_upper:
         genes = [gene.upper() for gene in genes]
 
-    def replace_mosaic_cell_with_grid(fig, axs, label, nrows, ncols):
-        # Extract subplotspec from the original axes
-        original_ax = axs[label]
-        sspec = original_ax.get_subplotspec()
-        fig = original_ax.figure
-        original_ax.remove()
+    genes = resolve_display_genes(
+        genes, adata.var_names, fallback_genes=model.rhythmic_gene_names, n_genes=4
+    )
 
-        # Create new inner grid
-        inner = GridSpecFromSubplotSpec(
-            nrows, ncols, subplot_spec=sspec, hspace=0.3, wspace=0.1
-        )
-
-        # Create new axes and store them in a list
-        subaxes = []
-        for r in range(nrows):
-            for c in range(ncols):
-                ax = fig.add_subplot(inner[r, c])
-                ax.spines["top"].set_visible(False)
-                ax.spines["right"].set_visible(False)
-                subaxes.append(ax)
-
-        # Replace entry in axs dict
-        axs[label] = subaxes
-
-        return axs
+    replace_mosaic_cell_with_grid = _replace_mosaic_cell_with_grid
 
     mosaic = [
         ["A", "B"],
@@ -997,6 +1334,9 @@ def plot_cell_cycle_validations(
     #### Plot the selected genes profiles ####
     for i, gene in enumerate(genes):
         ax = axs["A"][i]
+        if gene is None:
+            ax.axis("off")
+            continue
         modify_axis_labels(ax=ax, axis="x", step=0.5)
 
         plot_smoothed_profiles(
@@ -1019,6 +1359,9 @@ def plot_cell_cycle_validations(
     df_rhythmic["inferred_theta"] = thetas.detach().numpy()
     for i, gene in enumerate(genes):
         ax = axs["B"][i]
+        if gene is None or gene not in df_rhythmic.columns:
+            ax.axis("off")
+            continue
         modify_axis_labels(ax=ax, axis="x", step=0.5)
         plot_smoothed_profiles(
             thetas.detach().numpy(),
@@ -1074,7 +1417,7 @@ def plot_cell_cycle_validations(
         ax.set_yscale("log")
         f_legend = (
             "Distribution of the inferred phases separating cells with high posterior width from others. \n"
-            "(Having cells with high posterior width should be in the G1 area)"
+            "(Cells with high posterior width should be in the G1 area)"
         )
 
     else:
@@ -1161,17 +1504,7 @@ F. {f_legend}
         labels = ["z1", "z2"]
 
     ### Latent f space (defines the inferred phase) ###
-    def transform_projected_space(points, phases):
-        x = points[:, 0]
-        y = points[:, 1]
-        r = np.sqrt(x**2 + y**2)
-
-        x_new = r * np.cos(phases)
-        y_new = r * np.sin(phases)
-
-        return np.column_stack([x_new, y_new])
-
-    cells_projected_rotated = transform_projected_space(cells_projected, phases)
+    cells_projected_rotated = project_and_rotate_f_space(cells_projected, phases)
     ax = axs_space["A"]
     sns.histplot(
         x=cells_projected_rotated[:, 0], y=cells_projected_rotated[:, 1], ax=ax

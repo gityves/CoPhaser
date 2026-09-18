@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from typing import List
+from CoPhaser._resources import resource_path
 from CoPhaser.model.neuralNet import NeuralNet
 from CoPhaser.model.rhythmic_encoder_VAE import RhythmicEncoderVAE
 from CoPhaser.model.rhythmic_decoder import RhythmicDecoder
@@ -13,7 +14,6 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from CoPhaser import utils
 import warnings
-import pkg_resources
 import numpy as np
 import tqdm
 
@@ -91,7 +91,7 @@ class CoPhaser(nn.Module):
         self.lambda_range = lambda_range
 
         # modified by the trainer
-        self.cycling_status_prior = False
+        self.cycling_status_prior = 1.0
 
         # set up variable and rhythmic genes
         if force_context_genes_order is not None:
@@ -544,9 +544,7 @@ class CoPhaser(nn.Module):
             self.rhythmic_decoder.unfreeze_weights_genes(gene_indices_input)
 
     def _get_gene_annotation(self):
-        CCG_path = pkg_resources.resource_filename(
-            __name__, f"../resources/CCG_annotated.csv"
-        )
+        CCG_path = resource_path("CCG_annotated.csv")
         df_gene = pd.read_csv(CCG_path, index_col="Primary name")["Peaktime"]
         model_gene_names = (
             self.context_genes
