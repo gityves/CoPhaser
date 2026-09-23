@@ -3,7 +3,7 @@ from torch.distributions import kl_divergence as kl
 from typing import Literal
 import torch
 
-from CoPhaser.powerSpherical import PowerSpherical
+from cophaser.powerSpherical import PowerSpherical
 
 
 class Loss:
@@ -16,9 +16,9 @@ class Loss:
         nb_case_log_lik = NegativeBinomial(
             total_count=theta_dispersion, logits=nb_logits
         ).log_prob(x)
-        log_lik_nonzero = ((1 - dropout_prob) * nb_case_log_lik * nonzero_mask).sum(
-            dim=-1
-        )
+        log_lik_nonzero = (
+            (torch.log1p(-dropout_prob) + nb_case_log_lik) * nonzero_mask
+        ).sum(dim=-1)
         log_lik_zero = (
             dropout_prob + (1 - dropout_prob) * torch.exp(nb_case_log_lik)
         ).log() * zero_mask
@@ -478,7 +478,11 @@ class Loss:
         radii = torch.sqrt(
             (inference_outputs["x_projected"][cycling_cells] ** 2).sum(dim=1) + 1e-8
         )
-        radial_variance_loss = torch.var(radii) * closed_circle_weight
+        # var of a single element is NaN
+        if radii.numel() < 2:
+            radial_variance_loss = torch.zeros((), device=radii.device, dtype=radii.dtype)
+        else:
+            radial_variance_loss = torch.var(radii) * closed_circle_weight
         circle_deviation_loss = torch.mean((radii - 1) ** 2) * closed_circle_weight
 
         loss_dict["radial_variance"] = radial_variance_loss.item()
@@ -500,7 +504,7 @@ class Loss:
             to_detach=MI_detach,
         ) * min(epoch / 20, 1)
         loss += MI_loss
-        loss_dict["MI_loss"] = MI_loss.item() / MI_weight
+        loss_dict["MI_loss"] = MI_loss.item() / (MI_weight if MI_weight != 0 else 1)
 
         # Informative prior on the phase, annealed away by the trainer (phase_prior_kappa reaches 0).
         has_prior = (

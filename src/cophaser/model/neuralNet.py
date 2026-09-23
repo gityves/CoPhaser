@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from typing import Literal
-from CoPhaser.model.freezableModule import FreezableModule
+from cophaser.model.freezableModule import FreezableModule
 
 
 class NeuralNet(FreezableModule):

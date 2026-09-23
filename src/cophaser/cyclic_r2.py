@@ -221,7 +221,7 @@ def fit_cyclic_r2_celltypes(
     assert z.shape[0] == N, "z must have one row per cell"
 
     if N > max_cells:
-        idx = np.random.choice(N, max_cells, replace=False)
+        idx = np.random.default_rng(0).choice(N, max_cells, replace=False)
         X, theta, z = X[idx], theta[idx], z[idx]
         if labels is not None:
             labels = np.asarray(labels, dtype=int)[idx]

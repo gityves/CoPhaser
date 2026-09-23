@@ -2,7 +2,7 @@ import atexit
 from contextlib import ExitStack
 from importlib import resources
 
-_PACKAGE = "CoPhaser"
+_PACKAGE = "cophaser"
 _RESOURCE_DIR = "resources"
 
 # Kept open for the life of the process; only does anything for non-filesystem installs.
@@ -12,7 +12,7 @@ _cache: dict[str, str] = {}
 
 
 def resource_path(name: str) -> str:
-    """Absolute path to ``CoPhaser/resources/<name>``.
+    """Absolute path to ``cophaser/resources/<name>``.
 
     Parameters
     ----------

@@ -3,13 +3,13 @@ import re
 import torch
 import torch.nn as nn
 from typing import List, Dict, Any, Optional
-from CoPhaser.model.CoPhaser import CoPhaser
+from cophaser.model.CoPhaser import CoPhaser
 import warnings
 import numpy as np
 import pandas as pd
 
 
-class VAEModelLoader:
+class DecoderPrior:
     """Handles loading of decoder priors."""
 
     @staticmethod
@@ -38,11 +38,7 @@ class VAEModelLoader:
 
         new_state_dict = model.rhythmic_decoder.state_dict()
         new_weights = new_state_dict["fourier_coefficients.weight"]
-        gene_names = (
-            model.context_genes
-            if model.rhythmic_decoder_to_all_genes
-            else model.rhythmic_gene_names
-        )
+        gene_names = model.context_genes
         gene_mapping = {gene.upper(): idx for idx, gene in enumerate(gene_names.copy())}
         genes_modified = torch.zeros(len(gene_names), dtype=bool)
         for gene in amp_phase_prior.keys():
@@ -57,10 +53,10 @@ class VAEModelLoader:
             b = amp * np.sin(phase)
             with torch.no_grad():
                 new_weights[gene_mapping[gene], 0] = torch.tensor(
-                    a, device=model.rhythmic_decoder.fourier_coefficients.weight.device
+                    a, dtype=new_weights.dtype, device=new_weights.device
                 )
                 new_weights[gene_mapping[gene], 1] = torch.tensor(
-                    b, device=model.rhythmic_decoder.fourier_coefficients.weight.device
+                    b, dtype=new_weights.dtype, device=new_weights.device
                 )
                 # set higher harmonics to 0
                 new_weights[gene_mapping[gene], 2:] *= 0
@@ -164,11 +160,7 @@ class VAEModelLoader:
         f_coeffs = f_coeffs[ordered_cols]
 
         # --- match genes ---
-        gene_names = (
-            model.context_genes
-            if model.rhythmic_decoder_to_all_genes
-            else model.rhythmic_gene_names
-        )
+        gene_names = model.context_genes
         gene_names_upper = [g.upper() for g in gene_names]
         gene_mapping = {gene: idx for idx, gene in enumerate(gene_names_upper)}
 

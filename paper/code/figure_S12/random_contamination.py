@@ -1,16 +1,16 @@
 import numpy as np
-from CoPhaser import utils
-from CoPhaser.trainer import Trainer
-from CoPhaser.loss import Loss
-from CoPhaser import plotting
-from CoPhaser.model import CoPhaser
-from CoPhaser import gene_sets
+from cophaser import utils
+from cophaser.trainer import Trainer
+from cophaser.loss import Loss
+from cophaser import plotting
+from cophaser.model import CoPhaser
+from cophaser import gene_sets
 
 
 import anndata
 
 import pandas as pd
-from CoPhaser import utils
+from cophaser import utils
 
 import tqdm
 from itertools import product

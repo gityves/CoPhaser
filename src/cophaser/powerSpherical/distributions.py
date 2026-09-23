@@ -96,6 +96,18 @@ class HypersphericalUniform(torch.distributions.Distribution):
         )
 
 
+class _Beta(torch.distributions.Beta):
+    # Beta sampling (Dirichlet) is not implemented on Apple GPUs: sample on CPU there
+    def rsample(self, sample_shape=()):
+        device = self.concentration1.device
+        if device.type != "mps":
+            return super().rsample(sample_shape)
+        cpu_beta = torch.distributions.Beta(
+            self.concentration1.cpu(), self.concentration0.cpu(), validate_args=False
+        )
+        return cpu_beta.rsample(sample_shape).to(device)
+
+
 class MarginalTDistribution(torch.distributions.TransformedDistribution):
 
     arg_constraints = {
@@ -113,7 +125,7 @@ class MarginalTDistribution(torch.distributions.TransformedDistribution):
         )
         self.scale = scale
         super().__init__(
-            torch.distributions.Beta(
+            _Beta(
                 (dim - 1) / 2 + scale, (dim - 1) / 2, validate_args=validate_args
             ),
             transforms=torch.distributions.AffineTransform(loc=-1, scale=2),

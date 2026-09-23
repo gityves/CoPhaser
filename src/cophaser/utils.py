@@ -9,7 +9,7 @@ from scipy.stats import circmean
 import anndata
 import matplotlib.pyplot as plt
 import torch
-from CoPhaser import gene_sets
+from cophaser import gene_sets
 from scipy.sparse import issparse
 
 
@@ -39,8 +39,12 @@ def add_histones_fraction(adata, layer="spliced", use_only_clustered=False):
         query = "Hist"
         if adata.var_names[int(len(adata.var_names) / 2)].isupper():
             query = query.upper()
+        mask = adata.var_names.str.contains(query)
+        if not mask.any():
+            # current HGNC/MGI names (H2ac1, H4C1, ...) don't contain "Hist"
+            return add_histones_fraction(adata, layer=layer, use_only_clustered=True)
         adata.obs["histones_fraction"] = (
-            adata[:, adata.var_names.str.contains(query)].layers[layer].sum(axis=1)
+            adata[:, mask].layers[layer].sum(axis=1)
         ) / adata.layers[layer].sum(axis=1)
 
 
@@ -284,10 +288,6 @@ def normalize_angles(x):
     return np.mod(x + np.pi, 2 * np.pi) - np.pi
 
 
-def normalize_angles_torch(x):
-    return torch.fmod(x + torch.pi, 2 * torch.pi) - torch.pi
-
-
 def fit_piecewise_linear(df, xlabel, ylabel, n_pieces, figsize=(8, 8)):
     x = df[xlabel].values
     y = df[ylabel].values
@@ -502,17 +502,20 @@ def create_synthetic_cells(adata: anndata.AnnData, n_bins=16, n_cells=50):
         adata.obs["inferred_theta"], n_bins, labels=list(range(n_bins))
     )
     for bin in range(n_bins // 2):
-        i_min = adata.obs[adata.obs["bin"] == bin].sample(n_cells, replace=False).index
-        i_max = (
-            adata.obs[adata.obs["bin"] == bin + n_bins // 2]
-            .sample(n_cells, replace=False)
-            .index
-        )
+        obs_min = adata.obs[adata.obs["bin"] == bin]
+        obs_max = adata.obs[adata.obs["bin"] == bin + n_bins // 2]
+        # bins smaller than n_cells contribute as many pairs as they can
+        n = min(n_cells, len(obs_min), len(obs_max))
+        if n == 0:
+            continue
+        i_min = obs_min.sample(n, replace=False).index
+        i_max = obs_max.sample(n, replace=False).index
         synthetic_cells = adata[i_min].copy()
         for layer in adata.layers.keys():
+            mean = (synthetic_cells.layers[layer] + adata[i_max].layers[layer]) / 2
             synthetic_cells.layers[layer] = (
-                (synthetic_cells.layers[layer] + adata[i_max].layers[layer]) / 2
-            ).ceil()
+                mean.ceil() if hasattr(mean, "ceil") else np.ceil(mean)
+            )
         synthetic_cells.obs_names = (
             synthetic_cells.obs_names + "_" + adata[i_max].obs_names
         )
@@ -635,13 +638,17 @@ def fit_cyclic_snr(
         return beta
 
     def _down_sample(X, theta, s, max_cells):
-        idx = np.random.choice(X.shape[0], max_cells, replace=False)
+        idx = np.random.default_rng(0).choice(X.shape[0], max_cells, replace=False)
         X = X[idx]
         theta = theta[idx]
         if s is not None:
             s = s[idx]
         return X, theta, s
 
+    # positional indexing below, so drop any pandas index
+    theta = np.asarray(theta)
+    if s is not None:
+        s = np.asarray(s)
     if issparse(X):
         if X.shape[0] > max_cells:
             X, theta, s = _down_sample(X, theta, s, max_cells)
@@ -857,8 +864,8 @@ def get_genes_fractions(gene_names, adata, layer="total", normalized=False):
     Parameters
     ----------
     gene_names : str or list of str
-        Gene name(s) to compute fractions for. Missing genes are dropped
-        with a warning rather than raising.
+        Gene name(s) to compute fractions for. Raises KeyError if any is missing
+        from ``adata.var_names`` (or if ``layer`` is not in ``adata.layers``).
     adata : AnnData
         Annotated data object.
     layer : str

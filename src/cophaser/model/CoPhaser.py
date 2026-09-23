@@ -2,18 +2,17 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from typing import List
-from CoPhaser._resources import resource_path
-from CoPhaser.model.neuralNet import NeuralNet
-from CoPhaser.model.rhythmic_encoder_VAE import RhythmicEncoderVAE
-from CoPhaser.model.rhythmic_decoder import RhythmicDecoder
-from CoPhaser.model.bernoulli_encoder import RelaxedBernoulliEncoder
-from CoPhaser.loss import Loss
-from CoPhaser import plotting
+from cophaser._resources import resource_path
+from cophaser.model.neuralNet import NeuralNet
+from cophaser.model.rhythmic_encoder_VAE import RhythmicEncoderVAE
+from cophaser.model.rhythmic_decoder import RhythmicDecoder
+from cophaser.model.bernoulli_encoder import RelaxedBernoulliEncoder
+from cophaser.loss import Loss
+from cophaser import plotting
 import anndata
 import pandas as pd
 from scipy.sparse import csr_matrix
-from CoPhaser import utils
-import warnings
+from cophaser import utils
 import numpy as np
 import tqdm
 
@@ -56,7 +55,7 @@ class CoPhaser(nn.Module):
         n_harm: int
             Number of harmonics used to decode the rhythmic contribution. Default is 3.
         rhythmic_decoder_to_all_genes: bool
-            If True, the rhythmic decoder decodes to all context genes, otherwise only to rhythmic genes. Default is True.
+            Must be True: the rhythmic decoder decodes to all context genes. Kept for saved checkpoints.
         use_mu_z_encoder: bool
             If True, corrects the input of the rhythmic encoder using a mean shift dependent on the latent space z. Default is True.
         use_lambda: bool
@@ -75,6 +74,8 @@ class CoPhaser(nn.Module):
             Default angle assigned to non-cycling cells in the rhythmic encoder. Default is -1.5, useful when not all cells are cycling (cycling_status_prior of trainer < 1).
         """
         super().__init__()
+        if not rhythmic_decoder_to_all_genes:
+            raise ValueError("rhythmic_decoder_to_all_genes=False is no longer supported.")
         # store initialization variables
         self.rhythmic_gene_names = rhythmic_gene_names
         if len(self.rhythmic_gene_names) == 0:
@@ -121,12 +122,7 @@ class CoPhaser(nn.Module):
             preload_weights=rhythmic_encoder_weights,
             default_angle=non_cycling_cells_angle,
         )
-        if rhythmic_decoder_to_all_genes:
-            n_outputs = len(self.context_genes)
-        else:
-            n_outputs = len(self.rhythmic_gene_names)
-
-        self.rhythmic_decoder = RhythmicDecoder(n_outputs, self.n_harm)
+        self.rhythmic_decoder = RhythmicDecoder(len(self.context_genes), self.n_harm)
 
         # variational autoencoder
         self.mean_encoder = NeuralNet(
@@ -174,7 +170,7 @@ class CoPhaser(nn.Module):
         super().to(*args, **kwargs)
         self.rhythmic_z_scale = self.rhythmic_z_scale.to(*args, **kwargs)
 
-        if self.adata_loaded:
+        if getattr(self, "mean_genes", None) is not None:
             self.mean_genes = self.mean_genes.to(*args, **kwargs)
 
         return self
@@ -252,6 +248,10 @@ class CoPhaser(nn.Module):
         library_size_field=None,
     ):
 
+        if not adata.var_names.is_unique:
+            raise ValueError(
+                "adata.var_names are not unique; call adata.var_names_make_unique() first."
+            )
         adata.layers[layer_to_use] = csr_matrix(adata.layers[layer_to_use])
         # Raise an error if some genes are not present in the anndata object
         if not set(self.context_genes).issubset(adata.var_names):
@@ -276,6 +276,11 @@ class CoPhaser(nn.Module):
         # variable genes
         variable_genes = adata[:, self.context_genes].layers[layer_to_use].toarray()
         variable_genes = torch.tensor(variable_genes, dtype=torch.float32)
+        if (variable_genes < 0).any() or (variable_genes != variable_genes.round()).any():
+            raise ValueError(
+                f"Layer '{layer_to_use}' contains negative or non-integer values; CoPhaser "
+                "expects raw counts (not normalized or log-transformed data)."
+            )
 
         mean_genes = torch.log(
             (variable_genes.mean(axis=0) / library_size.mean())
@@ -414,18 +419,9 @@ class CoPhaser(nn.Module):
         F *= _lambda.view(-1, 1)
         F = F * b_z.view(-1, 1) + F_g1.view(1, -1) * (1 - b_z).view(-1, 1)
 
-        # expand rhythmic term to all genes (zero padding)
-        if self.rhythmic_decoder_to_all_genes:
-            rhythmic_expanded = F
-        else:
-            rhythmic_expanded = torch.zeros(context_mean_shifts.size()).to(
-                context_mean_shifts.device
-            )
-            rhythmic_expanded[:, self.rhythmic_gene_indices] = F
-
         library_size = library_size.unsqueeze(1)
 
-        delta_mean = rhythmic_expanded + context_mean_shifts
+        delta_mean = F + context_mean_shifts
         px_rate = torch.exp(delta_mean + self.mean_genes) * library_size
 
         # terms required for loss calculation
@@ -525,32 +521,26 @@ class CoPhaser(nn.Module):
             "f_g1": f_g1,
         }
 
+    def _gene_masks(self, gene_names):
+        gene_names = set(gene_names)
+        mask_input = [g in gene_names for g in self.rhythmic_gene_names]
+        mask_output = [g in gene_names for g in self.context_genes]
+        return mask_input, mask_output
+
     def freeze_genes_rhythmic_VAE(self, gene_names):
-        gene_indices_input = [g in self.rhythmic_gene_names for g in gene_names]
-        self.rhythmic_encoder.freeze_weights_genes(gene_indices_input)
-        if self.rhythmic_decoder_to_all_genes:
-            gene_indices_output = [g in self.context_genes for g in gene_names]
-            self.rhythmic_decoder.freeze_weights_genes(gene_indices_output)
-        else:
-            self.rhythmic_decoder.freeze_weights_genes(gene_indices_input)
+        mask_input, mask_output = self._gene_masks(gene_names)
+        self.rhythmic_encoder.freeze_weights_genes(mask_input)
+        self.rhythmic_decoder.freeze_weights_genes(mask_output)
 
     def unfreeze_genes_rhythmic_VAE(self, gene_names):
-        gene_indices_input = [g in self.rhythmic_gene_names for g in gene_names]
-        self.rhythmic_encoder.unfreeze_weights_genes(gene_indices_input)
-        if self.rhythmic_decoder_to_all_genes:
-            gene_indices_output = [g in self.context_genes for g in gene_names]
-            self.rhythmic_decoder.unfreeze_weights_genes(gene_indices_output)
-        else:
-            self.rhythmic_decoder.unfreeze_weights_genes(gene_indices_input)
+        mask_input, mask_output = self._gene_masks(gene_names)
+        self.rhythmic_encoder.unfreeze_weights_genes(mask_input)
+        self.rhythmic_decoder.unfreeze_weights_genes(mask_output)
 
     def _get_gene_annotation(self):
         CCG_path = resource_path("CCG_annotated.csv")
         df_gene = pd.read_csv(CCG_path, index_col="Primary name")["Peaktime"]
-        model_gene_names = (
-            self.context_genes
-            if self.rhythmic_decoder_to_all_genes
-            else self.rhythmic_gene_names
-        )
+        model_gene_names = self.context_genes
         mask = np.isin([g.upper() for g in model_gene_names], df_gene.index)
         model_gene_names = np.array(model_gene_names)[mask]
         categories = df_gene[[g.upper() for g in model_gene_names]]
@@ -585,6 +575,9 @@ class CoPhaser(nn.Module):
         mean_phase, amplitudes, phases = self._get_phase_amplitude_mean(
             mask, categories
         )
+        # orientation needs genes annotated as G1/S
+        if "G1/S" not in mean_phase:
+            return None
         _, _, best_direction = utils.best_order(mean_phase)
         if plot:
             mean_phase_shifted = {
@@ -602,21 +595,14 @@ class CoPhaser(nn.Module):
                 categories,
                 ax=ax,
             )
-        if not "G1/S" in categories.values:
-            warnings.warn(
-                "The 'G1/S' phase is required to set the origin, but no genes annotated as G1/S were used."
-            )
-            return 0, best_direction
         return mean_phase["G1/S"], best_direction
 
     def plot_fourier_coefficients(self, plot_all_genes=False):
         ab_coefficients = (
             self.rhythmic_decoder.fourier_coefficients.weight.detach().cpu().numpy()
         )
-        if plot_all_genes and self.rhythmic_decoder_to_all_genes:
+        if plot_all_genes:
             gene_names = self.context_genes
-        elif plot_all_genes:
-            gene_names = self.rhythmic_gene_names
         else:
             ab_coefficients = ab_coefficients[self.rhythmic_gene_indices]
             gene_names = self.rhythmic_gene_names
@@ -629,7 +615,10 @@ class CoPhaser(nn.Module):
         plot=True,
         ax=None,
     ):
-        origin, direction = self._get_origine_direction(plot=plot, offset=offset, ax=ax)
+        origin_direction = self._get_origine_direction(plot=plot, offset=offset, ax=ax)
+        if origin_direction is None:
+            return thetas
+        origin, direction = origin_direction
         # set the mean g1/s at offset
         thetas = self.shift_phases(thetas, origin, direction, offset=offset)
         return thetas
@@ -662,7 +651,7 @@ class CoPhaser(nn.Module):
         thetas = space_outputs["theta"]
         if not isCellCycle:
             return thetas
-        return self.orient_align_pseudotimes(thetas, offset=offset, plot=plot)
+        return self.orient_align_pseudotimes(thetas, offset=offset, plot=plot, ax=ax)
 
     def _get_posterior_batch_size(self, n_cells, n_genes, device):
         """
@@ -887,7 +876,12 @@ class CoPhaser(nn.Module):
             ),
         }
         torch.save(
-            {"state_dict": self.state_dict(), "init_params": init_params}, file_path
+            {
+                "state_dict": self.state_dict(),
+                "init_params": init_params,
+                "mean_genes": getattr(self, "mean_genes", None),
+            },
+            file_path,
         )
 
     @classmethod
@@ -903,6 +897,9 @@ class CoPhaser(nn.Module):
             model = cls(**checkpoint["init_params"])
             model.load_state_dict(checkpoint["state_dict"])
             model.cycling_status_prior = cycling_status_prior
+            # absent in older checkpoints: then set by load_anndata
+            if checkpoint.get("mean_genes") is not None:
+                model.mean_genes = checkpoint["mean_genes"]
             return model
         else:
             raise ValueError(

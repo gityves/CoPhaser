@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.distributions import RelaxedBernoulli
-from CoPhaser.model import neuralNet
+from cophaser.model import neuralNet
 import torch.nn.functional as F
 import numpy as np
 

@@ -6,15 +6,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 from typing import Literal
+import warnings
 
-from CoPhaser._resources import resource_path
-from CoPhaser import utils
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-import umap
+from cophaser._resources import resource_path
+from cophaser import utils
 
 TITLE_FONT_SIZE = 18
 
@@ -304,22 +299,34 @@ def plot_smoothed_size_evolution(
             to_add = ""
 
     else:
-        median_data = get_median_data(adata_obs_tot)
+        median_data = get_median_data(adata_obs_tot.copy())
         to_add = ""
 
     # Plot the median values
     if ax is None:
-        pass
-    elif use_rad_axis:
-        fig, ax = modify_axis_labels()
-    else:
-        fig, ax = plt.subplot()
+        if use_rad_axis:
+            fig, ax = modify_axis_labels()
+        else:
+            fig, ax = plt.subplots()
     sns.lineplot(data=median_data, x="phase_center", y=counts_sum_field, hue=hue, ax=ax)
-    plt.xlabel(f"{phase_layer}")
-    plt.ylabel(f"Median {counts_sum_field}")
-    plt.title(f"Median {counts_sum_field} per {phase_layer}" + to_add)
+    ax.set_xlabel(f"{phase_layer}")
+    ax.set_ylabel(f"Median {counts_sum_field}")
+    ax.set_title(f"Median {counts_sum_field} per {phase_layer}" + to_add)
     if get_median_field:
         return median_data
+
+
+def _dense_1d(x):
+    """Flatten a sparse or dense array/matrix to a 1D numpy array."""
+    return np.asarray(x.toarray() if hasattr(x, "toarray") else x).ravel()
+
+
+def _resolve_genes(genes, var_names, case_insensitive):
+    """Map gene names to ``var_names``, optionally ignoring case (e.g. Top2a -> TOP2A)."""
+    if not case_insensitive:
+        return list(genes)
+    lookup = {str(v).upper(): v for v in var_names}
+    return [g if g in var_names else lookup.get(str(g).upper(), g) for g in genes]
 
 
 def plot_gene_profile(
@@ -339,16 +346,15 @@ def plot_gene_profile(
         figsize=(5 * ncols + 3, 5 * nrows), ncols=ncols, nrows=nrows, axis="x"
     )
     axs = axs.flatten()
-    if gene_to_upper:
-        genes = [gene.upper() for gene in genes]
+    genes = _resolve_genes(genes, adata.var_names, gene_to_upper)
     if library_size is None:
-        library_size = adata.layers[layer_to_use].sum(axis=1).A1
+        library_size = _dense_1d(adata.layers[layer_to_use].sum(axis=1))
 
     for i in range(len(genes)):
         sns.scatterplot(
             x=df_mean[theta_col],
             y=np.log(
-                adata[:, genes[i]].layers[layer_to_use].toarray().flatten()
+                _dense_1d(adata[:, genes[i]].layers[layer_to_use])
                 / library_size
                 * 10**4
                 + 1
@@ -410,16 +416,15 @@ def plot_fraction_counts(
         figsize=(5 * ncols + 3, 5 * nrows), ncols=ncols, nrows=nrows, axis="x"
     )
     axs = axs.flatten()
-    if gene_to_upper:
-        genes = [gene.upper() for gene in genes]
+    genes = _resolve_genes(genes, adata.var_names, gene_to_upper)
     if library_size is None:
-        library_size = adata.layers[layer_to_use].sum(axis=1).A1
+        library_size = _dense_1d(adata.layers[layer_to_use].sum(axis=1))
 
     for i in range(len(genes)):
         sns.scatterplot(
             x=thetas,
             y=np.log(
-                adata[:, genes[i]].layers[layer_to_use].toarray().flatten()
+                _dense_1d(adata[:, genes[i]].layers[layer_to_use])
                 / library_size
                 * 10**4
                 + 1
@@ -462,6 +467,14 @@ def plot_smoothed_profiles(
     hue_order=None,
     estimator="mean",
 ):
+    if np.isnan(x).any() or np.isnan(y).any():
+        warnings.warn(
+            "NaN values found in x or y. Dropping NaN values before plotting."
+        )
+        mask = ~(np.isnan(x) | np.isnan(y))
+        x = x[mask]
+        y = y[mask]
+        hue = hue[mask] if hue is not None else None
     x_raw = x.copy()
     x = [val.mid for val in pd.cut(x, bins=nbins)]
     if add_end_start_points:
@@ -520,14 +533,11 @@ def plot_reconstruction_gene(
     ylabel="log2 CP10k",
 ):
     if library_size is None:
-        try:
-            library_size = adata.layers[layer_to_use].sum(axis=1).A1
-        except:
-            library_size = adata.layers[layer_to_use].sum(axis=1)
+        library_size = _dense_1d(adata.layers[layer_to_use].sum(axis=1))
     sns.scatterplot(
         x=df_mean[theta_col],
         y=np.log2(
-            adata[:, gene].layers[layer_to_use].toarray().flatten()
+            _dense_1d(adata[:, gene].layers[layer_to_use])
             / library_size
             * 10**4
             + 1
@@ -738,7 +748,7 @@ def plot_r2_polar_scatter(
 ):
     """Polar scatter of per-gene cyclic R^2 vs. peaking phase.
 
-    ``r2_df`` is the output of ``CoPhaser.cyclic_r2.fit_cyclic_r2_celltypes``
+    ``r2_df`` is the output of ``cophaser.cyclic_r2.fit_cyclic_r2_celltypes``
     (columns "gene", "r2", "peak_phase"), computed independently of which
     genes were used as the model's rhythmic set. Genes in ``selected_genes``
     (the model's ``rhythmic_gene_names``) are highlighted as "Selected";
@@ -772,8 +782,11 @@ def plot_r2_polar_scatter(
     def top_per_phase_bin(df):
         df = df.copy()
         df["phase_bin"] = pd.cut(df["peak_phase"], bins=bin_edges, include_lowest=True)
-        return df.groupby("phase_bin", observed=True, group_keys=False).apply(
-            lambda g: g.nlargest(top_n_per_bin, "r2")
+        # equivalent to nlargest per bin, avoiding the deprecated groupby.apply
+        return (
+            df.sort_values("r2", ascending=False)
+            .groupby("phase_bin", observed=True, sort=False)
+            .head(top_n_per_bin)
         )
 
     labelled = [
@@ -800,8 +813,9 @@ def plot_r2_polar_scatter(
         adjust_text(texts, ax=ax, arrowprops=dict(arrowstyle="-", color="gray", lw=0.5))
 
     ax.set_xticklabels([])
-    ax.set_title("R² vs Peak Phase")
-    ax.legend()
+    ax.set_title("R² vs Peak Phase", fontsize=11)
+    ax.tick_params(labelsize=8)
+    ax.legend(fontsize=8, loc="lower right")
     return fig, ax
 
 
@@ -1000,7 +1014,7 @@ def _replace_mosaic_cell_with_grid(fig, axs, label, nrows, ncols):
     original_ax.remove()
 
     inner = GridSpecFromSubplotSpec(
-        nrows, ncols, subplot_spec=sspec, hspace=0.3, wspace=0.1
+        nrows, ncols, subplot_spec=sspec, hspace=0.4, wspace=0.35
     )
 
     subaxes = []
@@ -1075,17 +1089,10 @@ def first_harmonic_amp_phase(model):
 
     The rhythmic decoder's Fourier coefficients are the fit: columns 0 and 1 are the
     first harmonic's cosine and sine terms, so amplitude is their norm and the peaking
-    phase their angle. The decoder covers ``context_genes`` when it was built for all
-    genes, and only ``rhythmic_gene_names`` otherwise - either way, only the rhythmic
-    genes are returned.
+    phase their angle. Only the rhythmic genes are returned.
     """
     weights = model.rhythmic_decoder.fourier_coefficients.weight.detach().cpu().numpy()
-    decoder_genes = (
-        model.context_genes
-        if getattr(model, "rhythmic_decoder_to_all_genes", False)
-        else model.rhythmic_gene_names
-    )
-    index_of = {str(g).upper(): i for i, g in enumerate(decoder_genes)}
+    index_of = {str(g).upper(): i for i, g in enumerate(model.context_genes)}
 
     names, amps, phases = [], [], []
     for gene in model.rhythmic_gene_names:
@@ -1138,7 +1145,7 @@ def plot_circadian_validations(
     axs["C"].spines["top"].set_visible(False)
     axs["C"].spines["right"].set_visible(False)
 
-    thetas = space_outputs["theta"].detach().numpy()
+    thetas = space_outputs["theta"].detach().cpu().numpy()
 
     #### A: observed profiles ####
     for i, gene in enumerate(genes):
@@ -1162,7 +1169,7 @@ def plot_circadian_validations(
 
     #### B: the model's Fourier-derived profiles for the same genes ####
     df_rhythmic = pd.DataFrame(
-        generative_outputs["F"].detach().numpy(), columns=model.context_genes
+        generative_outputs["F"].detach().cpu().numpy(), columns=model.context_genes
     )
     for i, gene in enumerate(genes):
         ax = axs["B"][i]
@@ -1340,7 +1347,7 @@ def plot_cell_cycle_validations(
         modify_axis_labels(ax=ax, axis="x", step=0.5)
 
         plot_smoothed_profiles(
-            thetas.detach().numpy(),
+            thetas.detach().cpu().numpy(),
             utils.get_genes_fractions(
                 gene, adata, layer=layer, normalized=True
             ).flatten(),
@@ -1354,9 +1361,9 @@ def plot_cell_cycle_validations(
 
     #### Plot the modeled fourier contribution of the selected genes ####
     df_rhythmic = pd.DataFrame(
-        generative_outputs["F"].detach().numpy(), columns=model.context_genes
+        generative_outputs["F"].detach().cpu().numpy(), columns=model.context_genes
     )
-    df_rhythmic["inferred_theta"] = thetas.detach().numpy()
+    df_rhythmic["inferred_theta"] = thetas.detach().cpu().numpy()
     for i, gene in enumerate(genes):
         ax = axs["B"][i]
         if gene is None or gene not in df_rhythmic.columns:
@@ -1364,7 +1371,7 @@ def plot_cell_cycle_validations(
             continue
         modify_axis_labels(ax=ax, axis="x", step=0.5)
         plot_smoothed_profiles(
-            thetas.detach().numpy(),
+            thetas.detach().cpu().numpy(),
             df_rhythmic[gene].values.flatten(),
             ax=ax,
             xlabel="Inferred Phase",
@@ -1378,28 +1385,27 @@ def plot_cell_cycle_validations(
     ax = axs["C"]
     modify_axis_labels(ax=ax, axis="x", step=0.5)
     plot_smoothed_profiles(
-        thetas.detach().numpy(),
+        thetas.detach().cpu().numpy(),
         adata.obs["histones_fraction"],
         ax=ax,
         hue=hue,
-        legend=display_labels and not bool(i),
+        legend=display_labels,
+        estimator="median",
     )
     ax.set_ylabel("Histones Fraction (log normalized)")
     ax.set_xlabel("Inferred Phase")
 
     #### Plot the library size profiles ####
-    try:
-        library_size = adata.layers[layer].sum(axis=1).A1
-    except:
-        library_size = adata.layers[layer].sum(axis=1)
+    library_size = _dense_1d(adata.layers[layer].sum(axis=1))
     ax = axs["D"]
     modify_axis_labels(ax=ax, axis="x", step=0.5)
     plot_smoothed_profiles(
-        thetas.detach().numpy(),
+        thetas.detach().cpu().numpy(),
         library_size,
         ax=axs["D"],
         hue=hue,
-        legend=display_labels and not bool(i),
+        legend=display_labels,
+        estimator="median",
     )
     ax.set_ylabel("Library Size")
     ax.set_xlabel("Inferred Phase")
@@ -1481,12 +1487,14 @@ F. {f_legend}
     for l in mosaic[0]:
         axs_space[l].spines["top"].set_visible(False)
         axs_space[l].spines["right"].set_visible(False)
-    context = space_outputs["z"].detach().numpy()
+    context = space_outputs["z"].detach().cpu().numpy()
 
-    phases = pd.Series(thetas.detach().numpy())
-    cells_projected = space_outputs["x_projected"].detach().numpy()
+    phases = pd.Series(thetas.detach().cpu().numpy())
+    cells_projected = space_outputs["x_projected"].detach().cpu().numpy()
     if context.shape[0] > max_n_points:
-        idx = np.random.choice(context.shape[0], max_n_points, replace=False)
+        idx = np.random.default_rng(0).choice(
+            context.shape[0], max_n_points, replace=False
+        )
         context = context[idx]
         if hue is not None:
             hue = hue[idx]
@@ -1497,6 +1505,8 @@ F. {f_legend}
 
     if context.shape[1] > 2:
         print("Reducing context space to 2D using UMAP...")
+        import umap
+
         reducer = umap.UMAP()
         context = reducer.fit_transform(context)
         labels = ["UMAP z 1", "UMAP z 2"]

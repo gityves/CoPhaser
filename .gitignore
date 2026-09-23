@@ -10,3 +10,10 @@ data
 *.ipynb
 *.h5ad
 test
+cophaser_runs/
+*.json
+*.npy
+*.log
+automatic_tunning/
+build/
+CLAUDE.md

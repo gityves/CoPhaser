@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.distributions as dist
-from CoPhaser.powerSpherical import PowerSpherical, HypersphericalUniform
-from CoPhaser.model.neuralNet import NeuralNet
-from CoPhaser.model.freezableModule import FreezableModule
+from cophaser.powerSpherical import PowerSpherical, HypersphericalUniform
+from cophaser.model.neuralNet import NeuralNet
+from cophaser.model.freezableModule import FreezableModule
 
 
 class RhythmicEncoderVAE(FreezableModule):

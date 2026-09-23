@@ -1,23 +1,72 @@
 [build-system]
-requires = ["setuptools>=64", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "CoPhaser"
-version = "0.1"
-dependencies = [
-    "scanpy==1.11.5",
-    "ipykernel==7.1.0",
-    "ipywidgets==8.1.8",
-    "captum==0.8.0",
-    "requests==2.32.5",
+name = "cophaser"
+version = "0.1.0"
+description = "Single-cell phase inference across biological contexts from scRNA-seq data."
+readme = "README.MD"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Yves Paychère", email = "yves.paychere@epfl.ch" }]
+requires-python = ">=3.10"
+keywords = ["single-cell", "scRNA-seq", "cell cycle", "circadian", "phase inference", "variational autoencoder"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
+# Lower bounds only (no upper pins) so cophaser installs into existing scverse / PyTorch
+# environments. torch carries no CUDA pin: install the build matching your driver first
+# (see README) and pip keeps it.
+dependencies = [
+    "torch>=2.3",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "anndata>=0.10",
+    "scanpy[leiden]>=1.10",
+    "scikit-learn>=1.3",
+    "umap-learn>=0.5.5",
+    "matplotlib>=3.7",
+    "seaborn>=0.13",
+    "adjustText>=1.1",
+    "tqdm>=4.64",
+    "psutil>=5.9",
+    "captum>=0.9",
+    # light, and needed to run the tutorial notebooks in this environment
+    "ipykernel>=6.20",
+    "ipywidgets>=8.0",
+]
+
+[project.optional-dependencies]
+gui = ["streamlit>=1.38"]
+
+[project.urls]
+Homepage = "https://github.com/gityves/CoPhaser"
+Source = "https://github.com/gityves/CoPhaser"
+Issues = "https://github.com/gityves/CoPhaser/issues"
+
+[project.scripts]
+cophaser-gui = "cophaser.gui.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+namespaces = false
 
 [tool.setuptools.package-data]
-"CoPhaser" = ["resources/*"]
+"cophaser" = ["resources/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["__pycache__/*", "*.pyc"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

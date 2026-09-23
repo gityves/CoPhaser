@@ -1,3 +1,8 @@
+# Belghazi, M. I., Baratin, A., Rajeshwar, S., Ozair, S., Bengio, Y.,
+# Courville, A., & Hjelm, D. (2018). Mutual Information Neural
+# Estimation. Proceedings of the 35th International Conference on
+# Machine Learning (pp. 531-540). PMLR, Stockholm, Sweden.
+
 import torch
 import torch.nn as nn
 

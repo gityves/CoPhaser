@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from captum.attr import IntegratedGradients
 from torch.utils.data import DataLoader
-from CoPhaser.model import CoPhaser
+from cophaser.model import CoPhaser
 
 
 class EncoderMeanWrapper(torch.nn.Module):
@@ -64,7 +64,7 @@ def compute_feature_importance(
     generative_field=None,
     index_field=None,
     batch_size=1024,
-    device="cuda",
+    device="cuda" if torch.cuda.is_available() else "cpu",
     mu_dim=1,
     mask_cells=None,
 ):
@@ -74,8 +74,6 @@ def compute_feature_importance(
     Returns:
         attributions: np.ndarray of shape (mu_dim, n_input)
     """
-    if not model.rhythmic_decoder_to_all_genes:
-        raise NotImplementedError()
     if space_field is None and generative_field is None:
         raise ValueError("Either space_field or generative_field must be provided.")
     model = model.to(device)
@@ -114,14 +112,14 @@ def compute_feature_importance(
             )  # shape: (batch_size, n_input)
             running_attr[i] += attributions.sum(dim=0)
 
-    avg_attr = running_attr / len(x_variable_batch)  # shape: (mu_dim, n_input)
+    avg_attr = running_attr / len(x_variable)  # shape: (mu_dim, n_input)
     return avg_attr.detach().cpu().numpy()
 
 
 def compute_avg_feature_attributions(
     model: CoPhaser,
     batch_size=1024,
-    device="cuda",
+    device="cuda" if torch.cuda.is_available() else "cpu",
 ):
     """
     Computes average feature importance for each latent dim (μ_i) across the dataset.

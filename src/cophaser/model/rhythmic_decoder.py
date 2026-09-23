@@ -1,5 +1,5 @@
 import torch.nn as nn
-from CoPhaser.model.freezableModule import FreezableModule
+from cophaser.model.freezableModule import FreezableModule
 import warnings
 
 
@@ -43,4 +43,4 @@ class RhythmicDecoder(FreezableModule):
         self.unfreeze_indices("fourier_coefficients.weight", harm_indices, 1)
 
     def freeze_fourier_coefficients(self):
-        self.freeze_weights_harm(list(range(self.n_harm * 2)))
+        self.freeze_weights_harm(list(range(1, self.n_harm + 1)))

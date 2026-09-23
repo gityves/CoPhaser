@@ -1,11 +1,11 @@
 from importlib import resources
 
 import numpy as np
-from CoPhaser import utils
-from CoPhaser.trainer import Trainer
-from CoPhaser.loss import Loss
-from CoPhaser.model import CoPhaser
-from CoPhaser import gene_sets
+from cophaser import utils
+from cophaser.trainer import Trainer
+from cophaser.loss import Loss
+from cophaser.model import CoPhaser
+from cophaser import gene_sets
 
 import anndata
 
@@ -35,7 +35,7 @@ for _ in tqdm.tqdm(range(100)):
         )
         model.load_anndata(adata, layer_to_use="total")
         f_coeffs_path = (
-            resources.files("CoPhaser") / "resources" / "fourier_coefficients_RPE.csv"
+            resources.files("cophaser") / "resources" / "fourier_coefficients_RPE.csv"
         )
         f_coeffs = pd.read_csv(f_coeffs_path, index_col=0)
         f_coeffs.drop("A_0", axis=1, inplace=True)
