@@ -1,14 +1,13 @@
-from torch.utils.data import DataLoader
-import copy
+from torch.utils.data import DataLoader, Subset
 import torch
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from CoPhaser import SingleCellDataset
-from CoPhaser.MINE import MINE
-from CoPhaser.model.CoPhaser import CoPhaser
+from cophaser import SingleCellDataset
+from cophaser.MINE import MINE
+from cophaser.model.CoPhaser import CoPhaser
 from typing import Literal, List, Tuple
 
 
@@ -36,6 +35,7 @@ class Trainer:
         cycling_status_prior=1,
         # modify this to unfreeze layers at specific epochs
         unfreeze_epoch_layer: List[Tuple[int, str]] = [],
+        cycle: Literal["cell_cycle", "circadian"] = None,
         # optional informative prior on the phase, annealed to a flat prior during training
         phase_prior_anneal_epochs=50,
         phase_prior_weight=2.0,
@@ -53,7 +53,7 @@ class Trainer:
         unfreeze_epoch_layer, modify this to unfreeze layers at specific epochs, if you pretrained parts of the model.
         cycle, name the biological cycle ("cell_cycle" or "circadian") to enable the
         unsupervised quality score used to pick between restarts (see quality_score() and
-        CoPhaser.cycle_qc.fit_with_restarts). Default None keeps the previous behaviour.
+        cophaser.cycle_qc.fit_with_restarts). Default None keeps the previous behaviour.
 
         Parameters
         ----------
@@ -90,6 +90,8 @@ class Trainer:
         unfreeze_epoch_layer : List[Tuple[int, str]], optional
             List of tuples specifying at which epoch to unfreeze which layer, useful if you pretrained parts of the model.
             E.g., [(50, "rhythmic_decoder"), (100, "z_encoder")] would unfreeze the rhythmic decoder at epoch 50 and the z encoder at epoch 100, by default []
+        cycle : Literal["cell_cycle", "circadian"], optional
+            Needed only for quality_score()/quality_metrics(), by default None
         phase_prior_anneal_epochs : int, optional
             Epoch at which the phase prior becomes flat, by default 50.
         phase_prior_weight : float, optional
@@ -112,7 +114,7 @@ class Trainer:
         self.model.cycling_status_prior = cycling_status_prior
         self.beta_kl_cycling_status = beta_kl_cycling_status
         self.MI_detach = MI_detach
-        self.cycle = None
+        self.cycle = cycle
         self.phase_prior_anneal_epochs = phase_prior_anneal_epochs
         self.phase_prior_weight = phase_prior_weight
 
@@ -125,7 +127,7 @@ class Trainer:
                 "quality_score() needs the cycle: pass cycle='cell_cycle' (or 'circadian') "
                 "to Trainer."
             )
-        from CoPhaser import cycle_qc
+        from cophaser import cycle_qc
 
         return cycle_qc.quality_score(self.model, cycle=self.cycle)
 
@@ -138,7 +140,7 @@ class Trainer:
                 "quality_metrics() needs the cycle: pass cycle='cell_cycle' (or 'circadian') "
                 "to Trainer."
             )
-        from CoPhaser import cycle_qc
+        from cophaser import cycle_qc
 
         return cycle_qc.quality_metrics(self.model, cycle=self.cycle)
 
@@ -243,178 +245,185 @@ class Trainer:
         print_only_total_loss=False,
         silent=False,
         helped_training=True,
-        elbo_rescue=False,
-        max_repeats=5,
         on_epoch=None,
+        subsample=20_480,
+        subsample_seed=42,
     ):
+        """
+        Train the model.
+
+        Parameters
+        ----------
+        n_epochs : int, optional
+            Number of epochs to train for, by default 200
+        lr : float, optional
+            Learning rate for the optimizer, by default 1e-2
+        device : str, optional
+            Device to train on, by default "cuda" if available, else "cpu"
+        batch_size : int or None, optional
+            Batch size for the DataLoader. If None, will be set to roughly 1/10 of the number of cells, rounded to a power of two.
+        print_only_total_loss : bool, optional
+            If True, only print the total loss at each epoch, by default False
+        silent : bool, optional
+            If True, do not print any loss information, by default False
+        helped_training : bool, optional
+            If True, print additional information about the training process, by default True
+        on_epoch : callable or None, optional
+            Function to call at the end of each epoch, by default None
+        subsample : int or None, optional
+            Number of cells drawn (without replacement) at the start of every epoch; a fresh
+            draw each epoch, so all cells are seen over training. ``None``, or a value
+            >= the number of cells, trains on all cells every epoch. By default 20,480.
+        subsample_seed : int or None, optional
+            Seed for the subsample draws (not controlled by ``np.random.seed``), by default 42.
+        """
 
         self._check_data_loaded()
         n_cells = len(self.model.library_size)
+        if subsample is not None and int(subsample) >= n_cells:
+            subsample = None
+        subsample_rng = np.random.default_rng(subsample_seed)
+        # cells seen per epoch
+        n_epoch_cells = int(subsample) if subsample is not None else n_cells
         if batch_size is None:
             # set batch size to roughly 1/10 of the number of cells
-            batch_size = 2 ** int(np.log2(n_cells / 10))
-        elif batch_size > n_cells:
+            batch_size = 2 ** int(np.log2(n_epoch_cells / 10))
+        elif batch_size > n_epoch_cells:
             print(
-                f"Warning: batch_size={batch_size} exceeds the {n_cells} cells in the "
-                f"dataset; using batch_size={n_cells} instead. Pass batch_size=None to let "
+                f"Warning: batch_size={batch_size} exceeds the {n_epoch_cells} cells used per "
+                f"epoch; using batch_size={n_epoch_cells} instead. Pass batch_size=None to let "
                 "the trainer choose (about a tenth of the cells, rounded to a power of two)."
             )
-            batch_size = n_cells
+            batch_size = n_epoch_cells
 
         self.model.to(device)
-        data_loader = self._create_dataloader(batch_size)
+        # with a subsample, the loader is rebuilt every epoch below
+        data_loader = None if subsample is not None else self._create_dataloader(batch_size)
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         mine_net, mine_optimizer = self._init_mine_network(device)
 
-        repeat = True
-        init_model = copy.deepcopy(self.model.state_dict())
-        n_repeats = 0
         n_skipped = 0  # optimizer steps skipped because the loss was not finite
 
-        while n_repeats < max_repeats and repeat:
-            repeat = False
-            losses_training = {}
-            if n_repeats > 0:
-                print(f"Starting back training, repeat number {n_repeats}")
-                self.model.load_state_dict(init_model)
+        losses_training = {}
 
-            for epoch in range(n_epochs):
-                self.model.train()
-                losses_epoch = {}
+        for epoch in range(n_epochs):
+            self.model.train()
+            losses_epoch = {}
 
-                self._maybe_unfreeze_layers(epoch)
+            self._maybe_unfreeze_layers(epoch)
 
-                for batch in data_loader:
-                    if batch[0].size(0) < batch_size / 2:
-                        continue
+            if subsample is not None:
+                data_loader = self._create_dataloader(
+                    batch_size,
+                    indices=subsample_rng.choice(n_cells, size=int(subsample), replace=False),
+                )
 
-                    inputs = self._prepare_batch(batch, device)
-                    entropy_loss_weight = self._get_entropy_weight(epoch)
+            for batch in data_loader:
+                if batch[0].size(0) < batch_size / 2:
+                    continue
+
+                inputs = self._prepare_batch(batch, device)
+                entropy_loss_weight = self._get_entropy_weight(epoch)
+                optimizer.zero_grad()
+
+                generative_outputs, inference_outputs = self.model(
+                    inputs["variable_genes"],
+                    inputs["rhythmic_genes"],
+                    inputs["library_size"],
+                    epoch,
+                )
+
+                loss_dict = self.loss_fn(
+                    model=self.model,
+                    context_genes_raw_counts=inputs["variable_genes"],
+                    epoch=epoch,
+                    generative_outputs=generative_outputs,
+                    inference_outputs=inference_outputs,
+                    MINE_model=mine_net,
+                    entropy_loss_weight=entropy_loss_weight,
+                    entropy_per_batch=self.calculate_entropy_per_batch,
+                    L2_Z_decoder_loss_weight=self.L2_Z_decoder_loss_weight,
+                    MI_weight=self.MI_weight,
+                    rhythmic_likelihood_weight=self.rhythmic_likelihood_weight,
+                    non_rhythmic_likelihood_weight=self.non_rhythmic_likelihood_weight,
+                    closed_circle_weight=self.closed_circle_weight,
+                    noise_model=self.noise_model,
+                    beta_kl_f=self.beta_kl_f,
+                    beta_kl_cycling_status=self.beta_kl_cycling_status,
+                    batch_keys=inputs["batch_keys"],
+                    cycling_status_prior=self.cycling_status_prior,
+                    MI_detach=self.MI_detach,
+                    phase_prior_direction=(
+                        None
+                        if inputs["phase_prior"] is None
+                        else torch.stack(
+                            [
+                                torch.cos(inputs["phase_prior"]),
+                                torch.sin(inputs["phase_prior"]),
+                            ],
+                            dim=-1,
+                        )
+                    ),
+                    phase_prior_kappa=(
+                        None
+                        if inputs["phase_prior_kappa"] is None
+                        else inputs["phase_prior_kappa"]
+                        * self._phase_prior_anneal(epoch)
+                    ),
+                    phase_prior_weight=self.phase_prior_weight,
+                )
+                loss = loss_dict["total_loss"]
+                self.record_loss_batches(
+                    losses_batch=loss_dict, losses_epoch=losses_epoch
+                )
+                loss.backward()
+
+                if epoch > 20:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 4.0)
+                if self._step_is_finite(loss, self.model):
+                    optimizer.step()
+                else:
+                    n_skipped += 1
                     optimizer.zero_grad()
 
-                    generative_outputs, inference_outputs = self.model(
-                        inputs["variable_genes"],
-                        inputs["rhythmic_genes"],
-                        inputs["library_size"],
-                        epoch,
-                    )
+                self._train_mine(mine_net, mine_optimizer, loss_dict, inference_outputs)
 
-                    loss_dict = self.loss_fn(
-                        model=self.model,
-                        context_genes_raw_counts=inputs["variable_genes"],
-                        epoch=epoch,
-                        generative_outputs=generative_outputs,
-                        inference_outputs=inference_outputs,
-                        MINE_model=mine_net,
-                        entropy_loss_weight=entropy_loss_weight,
-                        entropy_per_batch=self.calculate_entropy_per_batch,
-                        L2_Z_decoder_loss_weight=self.L2_Z_decoder_loss_weight,
-                        MI_weight=self.MI_weight,
-                        rhythmic_likelihood_weight=self.rhythmic_likelihood_weight,
-                        non_rhythmic_likelihood_weight=self.non_rhythmic_likelihood_weight,
-                        closed_circle_weight=self.closed_circle_weight,
-                        noise_model=self.noise_model,
-                        beta_kl_f=self.beta_kl_f,
-                        beta_kl_cycling_status=self.beta_kl_cycling_status,
-                        batch_keys=inputs["batch_keys"],
-                        cycling_status_prior=self.cycling_status_prior,
-                        MI_detach=self.MI_detach,
-                        phase_prior_direction=(
-                            None
-                            if inputs["phase_prior"] is None
-                            else torch.stack(
-                                [
-                                    torch.cos(inputs["phase_prior"]),
-                                    torch.sin(inputs["phase_prior"]),
-                                ],
-                                dim=-1,
-                            )
-                        ),
-                        phase_prior_kappa=(
-                            None
-                            if inputs["phase_prior_kappa"] is None
-                            else inputs["phase_prior_kappa"]
-                            * self._phase_prior_anneal(epoch)
-                        ),
-                        phase_prior_weight=self.phase_prior_weight,
-                    )
-                    loss = loss_dict["total_loss"]
-                    self.record_loss_batches(
-                        losses_batch=loss_dict, losses_epoch=losses_epoch
-                    )
-                    loss.backward()
-
-                    if epoch > 20:
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 4.0)
-                    if self._step_is_finite(loss, self.model):
-                        optimizer.step()
-                    else:
-                        n_skipped += 1
-                        optimizer.zero_grad()
-
-                    self._train_mine(
-                        mine_net, mine_optimizer, loss_dict, inference_outputs
-                    )
-
-                self._loss_handling(
-                    epoch,
-                    n_epochs,
-                    losses_epoch,
-                    losses_training,
-                    print_only_total_loss,
-                    silent,
-                    helped_training,
-                    on_epoch,
-                )
-                if (
-                    epoch == 20
-                    and "elbo_loss" in losses_training
-                    and np.median(losses_training["elbo_loss"][15:]) < 900
-                    and n_repeats < max_repeats
-                ):
-                    factor = np.median(losses_training["elbo_loss"][15:]) / 1000
-                    if elbo_rescue:
-                        self.rhythmic_likelihood_weight /= factor
-                        self.non_rhythmic_likelihood_weight /= factor
-                        print(
-                            f"Elbo loss is low, increasing reconstruction weights:"
-                            f"new rhythmic_likelihood_weight={self.rhythmic_likelihood_weight:.2f},"
-                            f"new non_rhythmic_likelihood_weight={self.non_rhythmic_likelihood_weight:.2f}"
-                        )
-                        repeat = True
-                        n_repeats += 1
-                        break
-                    # Off by default: say what the rescue would have done, and carry on. The
-                    # restart costs 20 epochs and the same correction can be applied before
-                    # training - see this method's docstring.
-                    print(
-                        f"Warning: the ELBO is {np.median(losses_training['elbo_loss'][15:]):.0f} "
-                        f"at epoch 20, low enough that the reconstruction term may not "
-                        f"dominate the regularisers. Training continues unchanged. To act on "
-                        f"it, restart with both likelihood weights multiplied by "
-                        f"{1 / factor:.2f} (rhythmic "
-                        f"{self.rhythmic_likelihood_weight / factor:.2f}, non-rhythmic "
-                        f"{self.non_rhythmic_likelihood_weight / factor:.2f}), or let "
-                        f"CoPhaser.auto_hyperparameters set them from the counts. Pass "
-                        f"elbo_rescue=True to rescale and restart automatically instead."
-                    )
-            if n_repeats == max_repeats:
+            self._loss_handling(
+                epoch,
+                n_epochs,
+                losses_epoch,
+                losses_training,
+                print_only_total_loss,
+                silent,
+                helped_training,
+                on_epoch,
+            )
+            if (
+                epoch == 20
+                and "elbo_loss" in losses_training
+                and np.median(losses_training["elbo_loss"][15:]) < 900
+            ):
+                factor = 1000 / np.median(losses_training["elbo_loss"][15:])
                 print(
-                    f"Maximum number of repeats ({max_repeats}) reached, stopped automatic tuning."
+                    f"Warning: the ELBO is {np.median(losses_training['elbo_loss'][15:]):.0f} "
+                    f"at epoch 20, low enough that the reconstruction term may not dominate "
+                    f"the regularisers. Training continues unchanged. To act on it, rerun "
+                    f"with both likelihood weights multiplied by {factor:.2f} (rhythmic "
+                    f"{self.rhythmic_likelihood_weight * factor:.2f}, non-rhythmic "
+                    f"{self.non_rhythmic_likelihood_weight * factor:.2f}), or let "
+                    f"cophaser.auto_hyperparameters set them from the counts."
                 )
-            if repeat:
-                continue
-            if n_skipped:
-                print(
-                    f"Warning: {n_skipped} optimizer step(s) were skipped because the loss "
-                    "was not finite. The run finished, but check it before trusting it."
-                )
-            if not silent:
-                self.plot_losses(losses_training)
-            else:
-                for k in losses_training.keys():
-                    losses_training[k] = losses_training[k][-1]
-                return losses_training
+        if n_skipped:
+            print(
+                f"Warning: {n_skipped} optimizer step(s) were skipped because the loss "
+                "was not finite. The run finished, but check it before trusting it."
+            )
+        if not silent:
+            self.plot_losses(losses_training)
+        else:
+            for k in losses_training.keys():
+                losses_training[k] = losses_training[k][-1]
+            return losses_training
 
     @staticmethod
     def _step_is_finite(loss, module):
@@ -431,7 +440,8 @@ class Trainer:
         if not self.model.adata_loaded:
             raise ValueError("model.load_anndata needs to be called before training.")
 
-    def _create_dataloader(self, batch_size):
+    def _create_dataloader(self, batch_size, indices=None):
+        """Training DataLoader; with `indices`, only those cells are visited."""
         dataset = SingleCellDataset(
             self.model.rhythmic_genes,
             self.model.variable_genes,
@@ -440,6 +450,8 @@ class Trainer:
             self.model.phase_prior if self._has_phase_prior() else None,
             self.model.phase_prior_kappa if self._has_phase_prior() else None,
         )
+        if indices is not None:
+            dataset = Subset(dataset, indices.tolist())
         return DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     def _init_mine_network(self, device):

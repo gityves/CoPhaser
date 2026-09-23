@@ -20,17 +20,34 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 3) Install the package
 ```bash
 cd CoPhaser/
-pip install .
+pip install ".[gui]"   # graphical interface
 ```
+   `pip install .` alone installs the Python API without the graphical interface.
 
 # Usage
-You can find a tutorial in the tutorials folder, but below are described the minimal steps required to train a model and extract the results from it.
+
+## Graphical interface
+
+If you would rather not write any code, the package ships a guided interface that takes you
+from an `.h5ad` file to inferred phases and validation plots in five steps, for all four cycle
+types. Installing the package with the `[gui]` extra (`pip install ".[gui]"`) allows you to run:
+
+```bash
+conda activate CoPhaser_Env
+cophaser-gui
+```
+
+If this does not work `python -m cophaser.gui` is exactly equivalent. See the [GUI tutorial](tutorials/2_gui_tutorial.ipynb) for a walkthrough of each step.
+
+## Python API
+
+[`tutorials/1_general_tutorial.ipynb`](tutorials/1_general_tutorial.ipynb) is the place to start; below are the minimal steps required to train a model and extract the results from it.
 
 1) Initialize a model, passing the cycling gene names, the context gene names (usually the 2000 most variable genes) and the dimension of z and the number of harmonics used for the rhythmic reconstruction.
 ```python
-from CoPhaser import CoPhaser, Trainer, Loss
-from CoPhaser import utils
-from CoPhaser import gene_sets
+from cophaser import CoPhaser, Trainer, Loss
+from cophaser import utils
+from cophaser import gene_sets
 
 # Define your gene sets for example
 # rhythmic_genes = gene_sets.SMALL_CELL_CYCLE_GENE_SET
