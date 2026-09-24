@@ -35,6 +35,7 @@ from cophaser import (
     auto_hyperparameters,
     auto_params,
     cycle_configs,
+    gene_sets,
     plotting,
     species as species_mod,
     suggest_n_latent,
@@ -1076,7 +1077,7 @@ def step_configure():
     # Circadian/somite warm-start the decoder from known amp/phase (tied to their unfreeze
     # schedule, so not optional).
     st.session_state.decoder_amp_phase_prior = (
-        dict(cycle_configs.CIRCADIAN_AMP_PHASE_PRIOR) if cycle == "circadian" else None
+        dict(gene_sets.amp_phase_circadian) if cycle == "circadian" else None
     )
     st.session_state.decoder_amp_phase_resource = (
         cycle_configs.CYCLE_TRAINER_DEFAULTS.get(cycle, {}).get(
@@ -1088,7 +1089,7 @@ def step_configure():
         # only genes in the model get a prior (e.g. just one of Arntl/Bmal1)
         in_model = {g.upper() for g in rhythmic_genes}
         n_prior_genes = sum(
-            g.upper() in in_model for g in cycle_configs.CIRCADIAN_AMP_PHASE_PRIOR
+            g.upper() in in_model for g in gene_sets.amp_phase_circadian
         )
     elif st.session_state.decoder_amp_phase_resource:
         n_prior_genes = len(cycle_configs.somite_amp_phase_prior(adata.var_names))
@@ -1113,11 +1114,12 @@ def step_configure():
     st.subheader("Training speed")
     n_cells = int(st.session_state.n_cells_after_qc or 0)
     subsample_on = st.toggle(
-        f"Train on a random subsample of {SUBSAMPLE_CELLS:,} cells",
+        f"Train on {SUBSAMPLE_CELLS:,} cells resampled each epoch",
         value=True,
-        help="Draws one random subset of cells and trains on it, instead of every cell. "
-        "This has been found to approximate training on the whole dataset well while "
-        "being substantially faster. Every cell is still assigned a phase at the end.",
+        help="Every epoch draws a fresh random subset of this many cells, so the model "
+        "still sees the whole dataset over the run while doing less work per epoch. This "
+        "has been found to approximate training on all cells well while being "
+        "substantially faster. Every cell is assigned a phase either way.",
     )
     # Always explicit: train_model subsamples by default.
     train_kwargs["subsample"] = SUBSAMPLE_CELLS if subsample_on else None
@@ -1125,9 +1127,9 @@ def step_configure():
         st.caption(f"Training on all {n_cells:,} cells - slower on a large dataset.")
     elif n_cells > SUBSAMPLE_CELLS:
         st.caption(
-            f"Training on {SUBSAMPLE_CELLS:,} of {n_cells:,} cells. Speeds up training "
-            "and approximates training on the whole dataset well; all "
-            f"{n_cells:,} cells still get a phase."
+            f"Each epoch visits {SUBSAMPLE_CELLS:,} of {n_cells:,} cells, redrawn every "
+            "epoch. Speeds up training and approximates training on the whole dataset "
+            f"well; all {n_cells:,} cells still get a phase."
         )
     else:
         st.caption(
@@ -1427,6 +1429,112 @@ def _fig_download_button(fig, label, filename):
     )
 
 
+def _clipboard_fallback():
+    """Make st.code's copy icon work over plain http (the Network URL, remote hosts).
+
+    That icon only calls navigator.clipboard.writeText, which browsers remove outside
+    secure contexts (https/localhost), so it silently copies nothing; st.json's icon
+    works because it falls back to execCommand("copy"). Give the page the same fallback.
+    The component iframe is same-origin, so it can patch the parent window.
+    """
+    # st.iframe, not st.components.v1.html (deprecated, removal announced for 2026-06-01)
+    # and not st.html, which sanitises the markup away: this needs a real iframe so the
+    # script runs, and a same-origin one so it can reach window.parent.
+    st.iframe(
+        """
+        <script>
+        const w = window.parent;
+        if (!w.__cophaserClipboardFallback) {
+            w.__cophaserClipboardFallback = true;
+            const fallback = (text) => {
+                const doc = w.document;
+                const active = doc.activeElement;
+                const t = doc.createElement("textarea");
+                t.value = text;
+                t.style.position = "fixed";
+                t.style.opacity = "0";
+                doc.body.appendChild(t);
+                t.select();
+                const ok = doc.execCommand("copy");
+                doc.body.removeChild(t);
+                if (active && active.focus) active.focus();
+                return ok ? Promise.resolve() : Promise.reject(new Error("copy failed"));
+            };
+            if (!w.navigator.clipboard) {
+                Object.defineProperty(w.navigator, "clipboard", {
+                    value: { writeText: fallback }, configurable: true,
+                });
+            }
+        }
+        </script>
+        """,
+        # This iframe only runs a script and shows nothing; st.iframe requires a positive
+        # height (unlike the old components.html, which took 0), so ask for the smallest.
+        height=1,
+    )
+
+
+def _results_loading_indicator():
+    """While the results page reruns, keep it at full opacity (instead of Streamlit's
+    dimming) and show a centred spinner.
+
+    Pure CSS on the app's running state, so it appears as soon as the rerun starts - not
+    only once the script reaches an st.spinner - and keeps animating while Python is busy.
+    Delayed slightly so quick reruns don't flash it.
+    """
+    st.markdown(
+        """
+        <style>
+        [data-testid="stElementContainer"][data-stale="true"] {
+            opacity: 1 !important;
+        }
+        [data-testid="stApp"]::before,
+        [data-testid="stApp"]::after {
+            position: fixed;
+            left: 50%;
+            z-index: 1000000;
+            pointer-events: none;
+            opacity: 0;
+            visibility: hidden;
+        }
+        [data-testid="stApp"]::after {
+            content: "";
+            top: 50%;
+            width: 3rem;
+            height: 3rem;
+            margin: -1.5rem 0 0 -1.5rem;
+            border: 0.3rem solid rgba(128, 128, 128, 0.25);
+            border-top-color: #ff4b4b;
+            border-radius: 50%;
+        }
+        [data-testid="stApp"]::before {
+            content: "Generating plots...";
+            top: calc(50% + 2.5rem);
+            transform: translateX(-50%);
+            padding: 0.2rem 0.8rem;
+            border-radius: 1rem;
+            background: rgba(255, 255, 255, 0.9);
+            color: #31333f;
+            font-size: 0.9rem;
+            white-space: nowrap;
+        }
+        [data-testid="stApp"][data-test-script-state="running"]::after {
+            visibility: visible;
+            animation: cophaser-spin 0.8s linear infinite,
+                cophaser-show 0.2s ease 0.4s forwards;
+        }
+        [data-testid="stApp"][data-test-script-state="running"]::before {
+            visibility: visible;
+            animation: cophaser-show 0.2s ease 0.4s forwards;
+        }
+        @keyframes cophaser-spin { to { transform: rotate(360deg); } }
+        @keyframes cophaser-show { to { opacity: 1; } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 @st.cache_resource(show_spinner="Loading trained model and computing outputs...")
 def _load_model_and_outputs(model_path, model_mtime, _adata, layer):
     """Cached forward pass. `model_mtime` invalidates it on retraining into the same folder."""
@@ -1515,6 +1623,8 @@ def _capped_hue_key(adata, hue_key):
     return CAPPED_HUE_COLUMN
 
 
+# A fragment: its button reruns only this section, not every plot above it.
+@st.fragment
 def _r2_diagnostic_section(adata, layer, model, thetas, space_outputs):
     st.subheader("Cyclic R² vs. peaking phase")
     st.caption("Expensive to compute (clustering + per-gene fit) - only run on demand.")
@@ -1588,6 +1698,7 @@ def _perform_shutdown():
 
 def step_results():
     st.header("5. Results")
+    _results_loading_indicator()
     # Same cells as the training script and the CSV.
     adata = _qc_filtered_adata()
     layer = st.session_state.layer
@@ -1766,6 +1877,7 @@ def run():
         unsafe_allow_html=True,
     )
     init_state()
+    _clipboard_fallback()
     st.title("CoPhaser")
     st.caption("Context-dependent single-cell Phase inference.")
 

@@ -66,7 +66,7 @@ def context_and_cycle_space_row(z_space, cells_projected, thetas, hue_values=Non
 
     import umap
 
-    embedding = umap.UMAP(n_components=2, random_state=0).fit_transform(
+    embedding = umap.UMAP(n_components=2, random_state=0, n_jobs=1).fit_transform(
         np.asarray(z_space)
     )
     fig, axs = plt.subplots(1, 3, figsize=(18, 5.5))

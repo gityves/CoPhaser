@@ -1,4 +1,5 @@
 from matplotlib.gridspec import GridSpecFromSubplotSpec
+import matplotlib
 import matplotlib.transforms as transforms
 import torch
 import numpy as np
@@ -1106,6 +1107,51 @@ def first_harmonic_amp_phase(model):
     return names, np.asarray(amps), np.asarray(phases)
 
 
+def reference_acrophases(names, reference=None):
+    """Reference acrophase (rad) for each of ``names``, NaN when unknown.
+
+    Matched case-insensitively, and through GENE_ALIASES (Bmal1/Arntl). ``reference``
+    defaults to ``gene_sets.amp_phase_circadian``.
+    """
+    from cophaser import gene_sets
+
+    if reference is None:
+        reference = gene_sets.amp_phase_circadian
+    ref_by_upper = {str(g).upper(): phase for g, (_, phase) in reference.items()}
+    out = []
+    for name in names:
+        key = str(name).upper()
+        phase = ref_by_upper.get(key, ref_by_upper.get(GENE_ALIASES.get(key)))
+        out.append(np.nan if phase is None else float(phase))
+    return np.asarray(out)
+
+
+def align_to_reference_acrophases(amps, phases, ref_phases, min_genes=2):
+    """Direction and offset best mapping fitted first-harmonic acrophases onto references.
+
+    Finds ``direction`` in {+1, -1} and ``offset`` maximising
+    ``|sum_g amp_g * exp(i * (ref_g - direction * phase_g))|`` - i.e. minimising the
+    amplitude-weighted ``sum(1 - cos(residual))`` - over genes with a finite reference.
+    An aligned phase is then ``direction * phase + offset``. Returns ``(1, 0.0)`` when
+    fewer than ``min_genes`` genes have a reference.
+    """
+    amps, phases, ref_phases = map(np.asarray, (amps, phases, ref_phases))
+    ok = np.isfinite(ref_phases) & np.isfinite(phases) & np.isfinite(amps)
+    if ok.sum() < min_genes:
+        return 1, 0.0
+    best = None
+    for direction in (1, -1):
+        resultant = (amps[ok] * np.exp(1j * (ref_phases[ok] - direction * phases[ok]))).sum()
+        if best is None or abs(resultant) > best[0]:
+            best = (abs(resultant), direction, float(np.angle(resultant)))
+    return best[1], best[2]
+
+
+def _wrap_phase(x):
+    """Wrap to [-pi, pi), the range the validation panels plot phases in."""
+    return (np.asarray(x) + np.pi) % (2 * np.pi) - np.pi
+
+
 def plot_circadian_validations(
     model,
     space_outputs,
@@ -1124,9 +1170,13 @@ def plot_circadian_validations(
     A. Observed profiles of four clock genes against the inferred phase.
     B. The model's own Fourier-derived profiles for the same genes.
     C. Distribution of the inferred phases (split by ``hue_key`` when given).
-    D. Fitted first-harmonic amplitude and peaking phase of every rhythmic gene - the
-       relative ordering around the circle is the part to read, since the origin and
-       direction of the inferred phase are arbitrary.
+    D. Fitted first-harmonic amplitude and peaking phase of every rhythmic gene, with an
+       arc from each clock gene to its reference acrophase (``gene_sets.amp_phase_circadian``)
+       coloured by the phase error.
+
+    The inferred phase is first reflected/rotated (``align_to_reference_acrophases``) so the
+    first-harmonic acrophases best match the reference; every panel, and the returned
+    ``thetas``, use that aligned phase.
     """
     hue = adata.obs[hue_key].values if hue_key is not None else None
     genes = resolve_display_genes(
@@ -1145,7 +1195,21 @@ def plot_circadian_validations(
     axs["C"].spines["top"].set_visible(False)
     axs["C"].spines["right"].set_visible(False)
 
-    thetas = space_outputs["theta"].detach().cpu().numpy()
+    # Align direction/origin to the reference clock acrophases (first harmonic only).
+    names, amps, phases = first_harmonic_amp_phase(model)
+    ref_phases = reference_acrophases(names)
+    direction, offset = align_to_reference_acrophases(amps, phases, ref_phases)
+    thetas = _wrap_phase(
+        direction * space_outputs["theta"].detach().cpu().numpy() + offset
+    )
+    phases = _wrap_phase(direction * phases + offset)
+    # Aligned to the reference acrophases, the phase reads as zeitgeber time (ZT, h).
+    zt = (thetas % (2 * np.pi)) * 24 / (2 * np.pi)
+    zt_ticks = np.arange(0, 25, 6)
+
+    def _zt_axis(ax):
+        ax.set_xticks(zt_ticks)
+        ax.set_xlim(0, 24)
 
     #### A: observed profiles ####
     for i, gene in enumerate(genes):
@@ -1153,14 +1217,14 @@ def plot_circadian_validations(
         if gene is None:
             ax.axis("off")
             continue
-        modify_axis_labels(ax=ax, axis="x", step=0.5)
+        _zt_axis(ax)
         plot_smoothed_profiles(
-            thetas,
+            zt,
             utils.get_genes_fractions(
                 gene, adata, layer=layer, normalized=True
             ).flatten(),
             ax=ax,
-            xlabel="Inferred Phase",
+            xlabel="ZT (h)",
             ylabel="Normalized counts (log)",
             hue=hue,
             legend=display_labels and not bool(i),
@@ -1176,12 +1240,12 @@ def plot_circadian_validations(
         if gene is None or gene not in df_rhythmic.columns:
             ax.axis("off")
             continue
-        modify_axis_labels(ax=ax, axis="x", step=0.5)
+        _zt_axis(ax)
         plot_smoothed_profiles(
-            thetas,
+            zt,
             df_rhythmic[gene].values.flatten(),
             ax=ax,
-            xlabel="Inferred Phase",
+            xlabel="ZT (h)",
             ylabel="Modeled F Coeffs (log)",
             hue=hue,
             legend=display_labels and not bool(i),
@@ -1190,23 +1254,44 @@ def plot_circadian_validations(
 
     #### C: distribution of the inferred phases ####
     ax = axs["C"]
-    modify_axis_labels(ax=ax, axis="x", step=0.5)
     sns.histplot(
-        x=thetas,
+        x=zt,
         hue=pd.Series(hue, name=hue_key) if hue is not None else None,
-        bins=40,
+        bins=np.linspace(0, 24, 41),
         ax=ax,
         legend=display_labels and hue is not None,
     )
-    ax.set_xlim(-np.pi, np.pi)
-    ax.set_xlabel("Inferred Phase")
+    _zt_axis(ax)
+    ax.set_xlabel("ZT (h)")
     ax.set_ylabel("Cells")
     ax.set_title("Distribution of inferred phases")
 
     #### D: fitted clock structure ####
     ax = axs["D"]
-    names, amps, phases = first_harmonic_amp_phase(model)
     ax.scatter(phases, amps, s=45, alpha=0.75)
+    # Arc from each fitted acrophase to its reference one, along the short way round,
+    # coloured by the signed error (fitted - reference) in hours.
+    errors = _wrap_phase(phases - ref_phases)
+    has_ref = np.isfinite(errors)
+    if has_ref.any():
+        err_hours = errors * 24 / (2 * np.pi)
+        norm = matplotlib.colors.Normalize(vmin=-6, vmax=6, clip=True)
+        cmap = plt.get_cmap("coolwarm")
+        for amp, ref, err, err_h in zip(
+            amps[has_ref], ref_phases[has_ref], errors[has_ref], err_hours[has_ref]
+        ):
+            color = cmap(norm(err_h))
+            arc = ref + np.linspace(0, err, 50)
+            ax.plot(arc, np.full_like(arc, amp), color=color, lw=2.5, alpha=0.9)
+            ax.scatter([ref], [amp], marker="o", s=45, facecolors="none", edgecolors=[color], lw=1.5)
+        fig.colorbar(
+            matplotlib.cm.ScalarMappable(norm=norm, cmap=cmap),
+            ax=ax,
+            shrink=0.6,
+            extend="both",
+            pad=0.1,
+            label="Fitted - reference acrophase (h)",
+        )
     # Low-amplitude genes all sit near the origin, so at a readable font size their labels
     # overlap badly - push them apart with adjustText, as the R2 panel does, with a
     # stronger repulsion and more room to move than the defaults allow (the labels are
@@ -1227,7 +1312,11 @@ def plot_circadian_validations(
             arrowprops=dict(arrowstyle="-", color="gray", lw=0.6),
         )
     ax.set_title("Fitted clock structure (first harmonic)", va="bottom")
-    ax.set_xticklabels([])
+    # Clock face: ZT0 on top, time running clockwise.
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    ax.set_xticks(np.arange(4) * np.pi / 2)
+    ax.set_xticklabels(["ZT0", "ZT6", "ZT12", "ZT18"])
 
     fig.tight_layout()
     label_panels_mosaic(fig, axs, mosaic)
@@ -1250,11 +1339,16 @@ C. Distribution of the inferred phases.
 (Cells should cover the whole cycle. A strong pile-up in one place, or a split that tracks
 the hue rather than the phase, means the fit is driven by something other than the clock.)
 
-D. Fitted first harmonic of every rhythmic gene: peaking phase as the angle, amplitude as
-the radius.
+D. Fitted first harmonic of every rhythmic gene on a clock face (ZT0 on top, clockwise):
+peaking ZT as the angle, amplitude as the radius. Each clock gene with a reference
+acrophase has an arc to that reference (open circle), coloured by the fitted - reference
+phase difference in hours.
 (You should see the canonical clock ordering - Dbp/Per3/Ciart/Nr1d1 grouped together and
-roughly opposite Bmal1/Npas2. The absolute position on the circle is meaningless, only the
-relative arrangement is.)""")
+roughly opposite Bmal1/Npas2 - with short arcs.)
+
+The inferred phase in all panels is reflected/shifted so the fitted first-harmonic
+acrophases best match the reference clock acrophases, and is shown as zeitgeber time
+(ZT, hours).""")
 
     if return_values:
         return fig, axs, thetas, genes
