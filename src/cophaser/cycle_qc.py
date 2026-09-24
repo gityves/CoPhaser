@@ -59,23 +59,6 @@ MARKER_GENES_WARN = 3
 # Marker genes detected in fewer cells than this are ignored when scoring from an AnnData.
 MARKER_MIN_DETECTED = 0.05
 
-# (amplitude, acrophase in radians) of core clock genes. Kept separate from
-# cycle_configs.CIRCADIAN_AMP_PHASE_PRIOR so a fit is not scored against its own warm start.
-CLOCK_REFERENCE: dict[str, tuple[float, float]] = {
-    "BMAL1": (1.816, 5.892),
-    "CLOCK": (0.471, 5.918),
-    "NPAS2": (1.387, 6.256),
-    "PER1": (0.456, 2.504),
-    "PER2": (0.892, 3.939),
-    "PER3": (0.920, 3.188),
-    "CRY1": (1.142, 5.023),
-    "CRY2": (0.115, 2.895),
-    "NR1D1": (1.885, 1.991),
-    "NR1D2": (1.172, 2.587),
-    "DBP": (1.914, 2.621),
-    "RORA": (0.091, 5.687),
-}
-
 MIN_CLOCK_GENES_FOR_ORDERING = 5
 
 RANKING_SIGNALS = (
@@ -268,13 +251,13 @@ def _circ_mean(phases):
 
 
 def _clock_acrophase_agreement(theta, frac, model):
-    """Mean acrophase error (hours, negated) vs CLOCK_REFERENCE after the best rotation/reflection.
+    """Mean acrophase error (hours, negated) vs gene_sets.amp_phase_circadian after the best rotation/reflection.
 
     The rotation is amplitude-weighted; the residual is an unweighted mean over genes.
     Returns (score, n_genes_used).
     """
     refs, phases, amps = [], [], []
-    for gene, (_, ref_phase) in CLOCK_REFERENCE.items():
+    for gene, (_, ref_phase) in gene_sets.amp_phase_circadian.items():
         j = _gene_indices(model, [gene])
         if not j:
             continue

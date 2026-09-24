@@ -60,27 +60,6 @@ def rhythmic_genes_for(cycle: str, species: Species) -> list[str]:
     raise ValueError(f"No packaged rhythmic gene list for cycle={cycle!r}.")
 
 
-# Circadian warm-start (amplitude, phase in rad), from paper/code/figure_5/aorta.ipynb.
-# Matched case-insensitively.
-CIRCADIAN_AMP_PHASE_PRIOR: dict[str, tuple[float, float]] = {
-    "Bmal1": (1, 5.5),
-    "Arntl": (1, 5.5),  # older name of Bmal1
-    "Npas2": (0.5, 5.5),
-    "Rorc": (0.5, 5.7),
-    "Nr1d1": (1, 2.0),
-    "Nr1d2": (0.75, 2.09),
-    "Tef": (0.75, 2.35),
-    "Ciart": (1, 2.35),
-    "Dbp": (1, 2.09),
-    "Per3": (1, 2.36),
-    "Cry1": (0.5, 4.71),
-    "Cry2": (0.25, 3),
-    "Per2": (0.6, 3.14),
-    "Per1": (0.5, 3.14),
-    "Hlf": (0.5, 3.14),
-}
-
-
 CYCLE_TRAINER_DEFAULTS: dict[str, dict] = {
     "circadian": dict(
         source="paper/code/figure_5/aorta.ipynb (cells 17, 19, 20)",
@@ -88,7 +67,7 @@ CYCLE_TRAINER_DEFAULTS: dict[str, dict] = {
         trainer=dict(
             non_rhythmic_likelihood_weight=2,
             rhythmic_likelihood_weight=10,
-            # Releases the genes CIRCADIAN_AMP_PHASE_PRIOR froze; change both together.
+            # Releases the genes gene_sets.amp_phase_circadian froze; change both together.
             unfreeze_epoch_layer=[(10, "rhythmic_decoder")],
             L2_Z_decoder_loss_weight=0,
             closed_circle_weight=0,
