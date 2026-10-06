@@ -69,7 +69,7 @@ The model can be sensitive to the hyperparameters, a description of their impact
 
 4) Train the model
 ```python
-trainer.train_model(n_epochs=200, lr=1e-2, device="cuda", batch_size=2048, )
+trainer.train_model(n_epochs=200, lr=1e-2, device="cuda")
 ```
 The batch_size can impact the training since it has a direct impact on the entropy inference. Usually set around 1/10th of the dataset.
 
